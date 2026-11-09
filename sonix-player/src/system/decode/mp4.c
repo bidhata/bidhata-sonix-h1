@@ -612,7 +612,7 @@ static void parse_ilst(mp4_file_t *m, const box_t *ilst) {
 				snprintf(m->itunsmpb, sizeof(m->itunsmpb), "%.*s", (int)sizeof(m->itunsmpb) - 1, value);
 			} else if (name[0] && value[0] && strcasecmp(name, "SERIES") == 0) {
 				snprintf(m->series, sizeof(m->series), "%s", value);
-			} else if (name[0] && value[0] && (strcasecmp(name, "SERIES-PART") == 0 || strcasecmp(name, "SERIES_PART") == 0)) {
+			} else if (name[0] && value[0] && (strcasecmp(name, "SERIES-PART") == 0 || strcasecmp(name, "SERIES_PART") == 0 || strcasecmp(name, "PART") == 0)) {
 				snprintf(m->series_part, sizeof(m->series_part), "%.*s", (int)sizeof(m->series_part) - 1, value);
 			} else if (name[0] && value[0] &&
 					   m->freeform_count < (strncasecmp(name, "replaygain_", 11) == 0 ? MAX_FREEFORM : MAX_FREEFORM - FREEFORM_REPLAYGAIN)) {
