@@ -79,6 +79,12 @@ void metadata_set_track_artist(bool on);
 // NULL when there are none.
 char *metadata_read_lyrics(const char *filepath);
 
+// Only the "<file>.tags" a streaming cache writes beside a track (see the
+// sidecar notes in metadata.c), without opening the track itself: what a list
+// of a few hundred cached tracks can afford per row. Fills every field of `out`
+// as metadata_read() does; false when there is no sidecar.
+bool metadata_read_sidecar(const char *filepath, song_metadata_t *out);
+
 // metadata_read(), and the description the file carries as plain text, for
 // an audiobook's summary: a Vorbis or APE DESCRIPTION, SUMMARY or COMMENT, an
 // ID3v2 COMM frame or TXXX:DESCRIPTION, an MP4 ldes, desc or comment atom.

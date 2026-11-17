@@ -33,6 +33,9 @@
 #include "src/system/playback/playlist.h"
 #include "src/system/remote/sonixlink.h"
 #include "src/system/net/wifi.h"
+#include "src/system/streaming/podcastcache.h"
+#include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/tidalcache.h"
 
 lv_obj_t *sonixlink_screen;
 
@@ -188,6 +191,10 @@ static void publish_queue_window(void) {
 		return;
 	}
 
+	// Which entries are a streaming service's cached file. The phone's copy of
+	// the index has no row for those, so /api/queue sends their sidecar tags.
+	bool streamed[SONIXLINK_QUEUE_WINDOW];
+
 	int written = 0;
 	for (int i = 0; i < SONIXLINK_QUEUE_WINDOW && first + i < count; i++) {
 		char *slot = paths + (size_t)written * PATH_MAX_HERE;
@@ -195,9 +202,10 @@ static void publish_queue_window(void) {
 			slot[0] = '\0';
 		}
 		pointers[written] = slot;
+		streamed[written] = tidalcache_owns(slot) || qobuzcache_owns(slot) || podcastcache_is_episode(slot);
 		written++;
 	}
-	sonixlink_publish_queue(count, position, first, pointers, written, generation);
+	sonixlink_publish_queue(count, position, first, pointers, streamed, written, generation);
 	free(paths);
 	free(pointers);
 }

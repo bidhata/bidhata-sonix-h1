@@ -17,7 +17,8 @@
 //     GET  /api/db                 the index file itself
 //     GET  /api/covers             the player's own thumbnail cache, as a file
 //     GET  /api/state              what is playing, volume, mode, battery
-//     GET  /api/queue              the playback queue around the current track
+//     GET  /api/queue              the playback queue around the current track,
+//                                  with the tags of the streamed tracks in it
 //     GET  /api/history?limit=N    the latest N entries of what the queue has
 //                                  played (playhistory.h), oldest first
 //     GET  /api/favourites         the starred tracks, as they stand now
@@ -263,8 +264,14 @@ void sonixlink_set_thumbs_path(const char *path);
 // `paths` holds `count` entries starting at queue position `first`. `total` is
 // how long the queue really is, `position` where playback sits in it and
 // `revision` playlist_revision() when the window was read.
-void sonixlink_publish_queue(int total, int position, int first, const char *const *paths, int count,
-							 unsigned revision);
+//
+// `streamed` marks the entries that are a streaming service's file: a Tidal or
+// Qobuz track, a podcast episode cached or kept. The phone's copy of the index
+// does not hold those, so /api/queue sends their title, artist and album from
+// the "<file>.tags" beside them. The interface says which ones they are, since
+// it is the side that knows where each service keeps its files.
+void sonixlink_publish_queue(int total, int position, int first, const char *const *paths, const bool *streamed,
+							 int count, unsigned revision);
 
 // The start of the stretch the phone asked for last, or -1 when it has asked
 // for none since the queue last changed.

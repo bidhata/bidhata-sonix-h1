@@ -30,6 +30,7 @@
 #include "src/system/library/cue.h"
 #include "src/system/decode/sacd_iso.h"
 #include "src/system/library/folderorder.h"
+#include "src/system/library/metadata.h"
 #include "src/system/playback/playlist.h"
 // SQLite is vendored: this header, not the system's.
 #include "src/system/db/sqlite3.h"
@@ -116,6 +117,7 @@ static int pending_link_count;
 static char *queue_arena;
 static size_t queue_arena_len;
 static int queue_offsets[SONIXLINK_QUEUE_WINDOW];
+static bool queue_streamed[SONIXLINK_QUEUE_WINDOW];
 static int queue_window_count;
 static int queue_window_first;
 static int queue_total;
@@ -229,8 +231,8 @@ void sonixlink_take_path(char *out, size_t out_size) {
 	pthread_mutex_unlock(&lock);
 }
 
-void sonixlink_publish_queue(int total, int position, int first, const char *const *paths, int count,
-							 unsigned revision) {
+void sonixlink_publish_queue(int total, int position, int first, const char *const *paths, const bool *streamed,
+							 int count, unsigned revision) {
 	if (count < 0) {
 		count = 0;
 	}
@@ -262,6 +264,7 @@ void sonixlink_publish_queue(int total, int position, int first, const char *con
 	queue_arena = arena;
 	queue_arena_len = at;
 	memcpy(queue_offsets, offsets, sizeof(int) * (size_t)count);
+	memcpy(queue_streamed, streamed, sizeof(bool) * (size_t)count);
 	queue_window_count = count;
 	queue_window_first = first < 0 ? 0 : first;
 	queue_total = total < 0 ? 0 : total;
@@ -1386,6 +1389,11 @@ static void route_queue(client_t *c, const char *query) {
 		first = from;
 	}
 	buf_fmt(&j, "\"first\":%d,\"paths\":[", first);
+	// The streamed entries' paths, copied out so their tags can be read once
+	// the lock is let go: reading from the card under it would hold up
+	// sonixlink_publish(), which waits on the same lock on the GUI thread.
+	char *streamed[SONIXLINK_QUEUE_WINDOW] = {0};
+	bool any_streamed = false;
 	for (int i = 0; i < count; i++) {
 		size_t at = (size_t)queue_offsets[i];
 		const char *path = (queue_arena && at < queue_arena_len) ? queue_arena + at : "";
@@ -1393,9 +1401,39 @@ static void route_queue(client_t *c, const char *query) {
 			buf_str(&j, ",");
 		}
 		buf_json_string(&j, path);
+		if (queue_streamed[i] && path[0]) {
+			streamed[i] = strdup(path);
+			any_streamed = true;
+		}
 	}
-	buf_str(&j, "]}");
+	buf_str(&j, "]");
 	pthread_mutex_unlock(&lock);
+
+	// Beside "paths", one entry each: the tags of a streamed track, null for
+	// everything else (the app finds those in its own copy of the index). Left
+	// out when the window holds no streamed track at all.
+	if (any_streamed) {
+		song_metadata_t *tags = malloc(sizeof(*tags));
+		buf_str(&j, ",\"tags\":[");
+		for (int i = 0; i < count; i++) {
+			if (i) {
+				buf_str(&j, ",");
+			}
+			if (tags && streamed[i] && metadata_read_sidecar(streamed[i], tags)) {
+				buf_str(&j, "{");
+				buf_json_field(&j, "title", tags->title, true);
+				buf_json_field(&j, "artist", tags->artist, true);
+				buf_json_field(&j, "album", tags->album, false);
+				buf_str(&j, "}");
+			} else {
+				buf_str(&j, "null");
+			}
+			free(streamed[i]);
+		}
+		buf_str(&j, "]");
+		free(tags);
+	}
+	buf_str(&j, "}");
 
 	reply_json(c, &j);
 }
