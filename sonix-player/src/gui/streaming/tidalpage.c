@@ -82,6 +82,7 @@ typedef enum {
 	JOB_PLAYLIST_TRACKS,
 	JOB_FAV_TRACKS,
 	JOB_FAV_ALBUMS,
+	JOB_FAV_PLAYLISTS,
 	JOB_USER_PLAYLISTS,
 	JOB_FEATURED,
 	JOB_PLAY,
@@ -895,9 +896,15 @@ static void fill_list(int from) {
 			make_row(a->name, a->album_count > 0 ? detail : "", a->image, false, i);
 			break;
 		}
+		case JOB_FAV_PLAYLISTS:
 		case JOB_USER_PLAYLISTS: {
 			const tidal_playlist_t *p = &result_playlists[i];
-			snprintf(detail, sizeof(detail), "%s \xC2\xB7 %d", p->owner, p->track_count);
+			// Tidal's own playlists come with a creator that has no name.
+			if (p->owner[0]) {
+				snprintf(detail, sizeof(detail), "%s \xC2\xB7 %d", p->owner, p->track_count);
+			} else {
+				snprintf(detail, sizeof(detail), "%d", p->track_count);
+			}
 			make_row(p->name, detail, p->image, false, i);
 			break;
 		}
@@ -1906,6 +1913,10 @@ static void *worker_main(void *arg) {
 			n = tidal_favorite_albums(off, result_albums + off, want);
 			snprintf(result_title, sizeof(result_title), "%s", tr("favourite_albums"));
 			break;
+		case JOB_FAV_PLAYLISTS:
+			n = tidal_favorite_playlists(off, result_playlists + off, want);
+			snprintf(result_title, sizeof(result_title), "%s", tr("favourite_playlists"));
+			break;
 		case JOB_USER_PLAYLISTS:
 			n = tidal_user_playlists(off, result_playlists + off, want);
 			snprintf(result_title, sizeof(result_title), "%s", tr("my_playlists"));
@@ -2165,6 +2176,7 @@ static void row_clicked_cb(lv_event_t *e) {
 		run(&job, "loading");
 		return;
 
+	case JOB_FAV_PLAYLISTS:
 	case JOB_USER_PLAYLISTS:
 		job.kind = JOB_PLAYLIST_TRACKS;
 		snprintf(job.id_text, sizeof(job.id_text), "%s", result_playlists[index].id);
@@ -2953,6 +2965,7 @@ static void rebuild_home(void) {
 	// every other searchable page.
 	settingsrow_add(home_container, "favourite_tracks", NULL, simple_job_cb, (void *)(intptr_t)JOB_FAV_TRACKS);
 	settingsrow_add(home_container, "favourite_albums", NULL, simple_job_cb, (void *)(intptr_t)JOB_FAV_ALBUMS);
+	settingsrow_add(home_container, "favourite_playlists", NULL, simple_job_cb, (void *)(intptr_t)JOB_FAV_PLAYLISTS);
 	settingsrow_add(home_container, "my_playlists", NULL, simple_job_cb, (void *)(intptr_t)JOB_USER_PLAYLISTS);
 	for (int i = 0; i < 3; i++) {
 		if (featured_hidden[i]) {

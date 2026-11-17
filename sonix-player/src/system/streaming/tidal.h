@@ -212,6 +212,7 @@ int tidal_playlist_tracks(const char *playlist_id, int offset, tidal_track_t *ou
 int tidal_favorite_tracks(int offset, tidal_track_t *out, int max);
 int tidal_favorite_albums(int offset, tidal_album_t *out, int max);
 int tidal_favorite_artists(int offset, tidal_artist_t *out, int max);
+int tidal_favorite_playlists(int offset, tidal_playlist_t *out, int max);
 int tidal_user_playlists(int offset, tidal_playlist_t *out, int max);
 
 // The collections Tidal features. `type` is one of the local short names, not

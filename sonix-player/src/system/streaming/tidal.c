@@ -1294,6 +1294,10 @@ int tidal_favorite_artists(int offset, tidal_artist_t *out, int max) {
 	return favorites("artists", offset, artist_reader, out, max);
 }
 
+int tidal_favorite_playlists(int offset, tidal_playlist_t *out, int max) {
+	return favorites("playlists", offset, playlist_reader, out, max);
+}
+
 int tidal_user_playlists(int offset, tidal_playlist_t *out, int max) {
 	if (max <= 0) {
 		return 0;
