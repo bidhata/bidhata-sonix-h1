@@ -199,6 +199,47 @@ ota_result_t firmware_update_model_check(const char *path) {
 	return file_contains(path, marker) ? OTA_OK : OTA_MODEL_MISMATCH;
 }
 
+bool firmware_file_sha256(const char *path, char out[SHA256_HEX_LEN]) {
+	if (!path || !out) {
+		return false;
+	}
+
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		return false;
+	}
+
+	sha256_ctx sha;
+	sha256_init(&sha);
+	unsigned char buf[64 * 1024];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+		sha256_update(&sha, buf, n);
+	}
+	bool ok = !ferror(f);
+	fclose(f);
+
+	if (ok) {
+		sha256_final_hex(&sha, out);
+	}
+	return ok;
+}
+
+ota_result_t firmware_update_prepare(const char *path) {
+	ota_result_t r = firmware_update_model_check(path);
+	if (r != OTA_OK) {
+		return r;
+	}
+
+	char hex[SHA256_HEX_LEN];
+	if (firmware_file_sha256(path, hex)) {
+		printf("firmware: update image sha256 %s\n", hex);
+	} else {
+		printf("firmware: cannot hash %s\n", path);
+	}
+	return OTA_OK;
+}
+
 bool firmware_update_start(void) {
 #ifdef HOST_BUILD
 	printf("firmware: (host build) would arm recovery and reboot\n");

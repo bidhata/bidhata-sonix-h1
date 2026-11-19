@@ -131,6 +131,34 @@ static void case_missing_file(void) {
 	CHECK(firmware_update_model_check(image_path("absent.upt")) == OTA_MODEL_MISMATCH, "missing image refused");
 }
 
+// 10. The manual path hashes the image with the same SHA-256 the OTA path uses.
+static void case_sha256_known_vector(void) {
+	char hex[SHA256_HEX_LEN];
+	write_image("abc.bin", "abc");
+	CHECK(firmware_file_sha256(image_path("abc.bin"), hex), "sha256 reads the file");
+	CHECK(strcmp(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0, "sha256 of abc matches the published vector");
+}
+
+// 11. A file that cannot be read yields no digest.
+static void case_sha256_missing(void) {
+	char hex[SHA256_HEX_LEN];
+	CHECK(!firmware_file_sha256(image_path("absent.bin"), hex), "sha256 of a missing file fails");
+}
+
+// 12. The single entry point both update paths call accepts a matching image.
+static void case_prepare_ok(void) {
+	active_model = &MODEL_R1;
+	write_image("r1.upt", "junk HiBy R1 junk");
+	CHECK(firmware_update_prepare(image_path("r1.upt")) == OTA_OK, "prepare accepts a matching image");
+}
+
+// 13. That entry point refuses another model's image.
+static void case_prepare_mismatch(void) {
+	active_model = &MODEL_R1;
+	write_image("r1.upt", "junk HiBy R3 Pro II junk");
+	CHECK(firmware_update_prepare(image_path("r1.upt")) == OTA_MODEL_MISMATCH, "prepare refuses another model");
+}
+
 int main(void) {
 	if (!mkdtemp(dir)) {
 		printf("FAIL cannot make a temporary directory\n");
@@ -145,6 +173,10 @@ int main(void) {
 	case_matching_r3_spaced();
 	case_r1_image_renamed_r3();
 	case_missing_file();
-	printf("firmware update model checks: all passed\n");
+	case_sha256_known_vector();
+	case_sha256_missing();
+	case_prepare_ok();
+	case_prepare_mismatch();
+	printf("firmware update checks: all passed\n");
 	return 0;
 }
