@@ -281,8 +281,7 @@ static void inline_text(const char *p, const char *end, char *out, size_t size) 
 		if (*p == '[' || (*p == '!' && end - p >= 2 && p[1] == '[')) {
 			const char *open = *p == '!' ? p + 1 : p;
 			const char *close = memchr(open, ']', (size_t)(end - open));
-			const char *stop = close && close + 1 < end && close[1] == '(' ? memchr(close, ')', (size_t)(end - close))
-																		: NULL;
+			const char *stop = close && close + 1 < end && close[1] == '(' ? memchr(close, ')', (size_t)(end - close)) : NULL;
 			if (stop) {
 				if (*p == '[') {
 					for (const char *c = open + 1; c < close && o + 1 < size; c++) {
@@ -565,12 +564,36 @@ static void show_release(void) {
 	hide_buttons(2);
 }
 
+// Both update paths run the same check on the file on the card before
+// recovery is armed. Returns a translation key on failure, NULL when the file
+// is this model's and recovery may be prepared.
+static const char *prepare_install(const char *path) {
+	switch (firmware_update_prepare(path)) {
+	case OTA_OK:
+		return NULL;
+	case OTA_MODEL_MISMATCH:
+		return "system_update_model_mismatch";
+	default:
+		return "system_update_file_missing";
+	}
+}
+
 static void install_cb(lv_timer_t *timer) {
 	(void)timer;
 	// The download ran on the battery. The file is on the card by now, so the
 	// update can still be made from there once the player is on the charger.
 	if (!fwupdate_battery_ok()) {
 		show_notice(tr("system_battery_warning"));
+		return;
+	}
+	char path[512];
+	if (!firmware_update_file_find(path, sizeof(path))) {
+		show_notice(tr("system_update_file_missing"));
+		return;
+	}
+	const char *error = prepare_install(path);
+	if (error) {
+		show_notice(tr(error));
 		return;
 	}
 	firmware_update_start();
@@ -592,8 +615,7 @@ static void check_finished(ota_result_t r) {
 		show_release();
 		break;
 	case OTA_UP_TO_DATE:
-		snprintf(text, sizeof(text), tr("system_update_up_to_date"),
-				 ota_installed_version()[0] ? ota_installed_version() : "?");
+		snprintf(text, sizeof(text), tr("system_update_up_to_date"), ota_installed_version()[0] ? ota_installed_version() : "?");
 		show_notice(text);
 		break;
 	case OTA_NO_NETWORK:
@@ -621,6 +643,9 @@ static void download_finished(ota_result_t r) {
 		break;
 	case OTA_CORRUPT:
 		show_notice(tr("system_update_corrupt"));
+		break;
+	case OTA_MODEL_MISMATCH:
+		show_notice(tr("system_update_model_mismatch"));
 		break;
 	case OTA_CANCELLED:
 		close_card();
@@ -679,6 +704,11 @@ static void sd_run(void *unused) {
 		return;
 	}
 	printf("firmware: update file %s\n", path);
+	const char *error = prepare_install(path);
+	if (error) {
+		gui_notify_popup(error);
+		return;
+	}
 	firmware_update_start();
 }
 
