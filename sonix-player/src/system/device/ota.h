@@ -36,6 +36,7 @@ typedef enum {
 	OTA_NO_SPACE,		 // not enough room on the card for the file
 	OTA_DOWNLOAD_FAILED, // the connection failed or ended early, or the card refused a write
 	OTA_CORRUPT,		 // the file arrived whole but its size or SHA-256 does not match the release
+	OTA_MODEL_MISMATCH,	 // the image on the card is for another player
 	OTA_CANCELLED,
 } ota_result_t;
 

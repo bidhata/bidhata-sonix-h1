@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "src/system/device/ota.h"
+
 // Firmware update from the microSD card -- the same two steps the stock
 // player does, and nothing more. An update from the internet (ota.h) puts the
 // file on the card first and then takes the same path.
@@ -43,6 +45,15 @@ const char *firmware_update_stem(void);
 // "r3proii.upt" -- in any mixture of upper and lower case; nothing else is
 // accepted, "update.upt" included.
 bool firmware_update_file_find(char *out, size_t out_size);
+
+// Checks an image before recovery is armed. The file name must be this
+// model's, and the image must declare this model: the recovery kernel flashes
+// whatever it is handed, so a wrong image renamed to the right file name would
+// otherwise brick the player.
+//
+// OTA_OK means the image passed. OTA_MODEL_MISMATCH names a file for another
+// player, OTA_NO_MODEL a build that cannot name its own image.
+ota_result_t firmware_update_model_check(const char *path);
 
 // Arms recovery and reboots into it. Does not return on the device, except
 // with false when it refuses: the battery reads under 30% with no cable in, a

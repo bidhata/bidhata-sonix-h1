@@ -1,5 +1,6 @@
 #include "firmware.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,16 +11,17 @@
 #include <unistd.h>
 
 #include "src/system/audio/audio.h"
-#include "src/system/device/clock.h"
 #include "src/system/core/config.h"
-#include "src/system/streaming/qobuzcache.h"
-#include "src/system/streaming/podcastcache.h"
-#include "src/system/streaming/tidalcache.h"
-#include "src/system/remote/dlna.h"
+#include "src/system/device/clock.h"
 #include "src/system/device/power.h"
 #include "src/system/device/sysinfo.h"
 #include "src/system/device/system.h"
 #include "src/system/device/usb.h"
+#include "src/system/remote/dlna.h"
+#include "src/system/streaming/podcastcache.h"
+#include "src/system/streaming/qobuzcache.h"
+#include "src/system/streaming/tidalcache.h"
+
 #include "src/gui/shell/gui.h"
 
 // Under this level, with no cable in, the update is not started: recovery
@@ -81,8 +83,9 @@ const char *firmware_update_stem(void) {
 	}
 	const sysinfo_model_t *model = sysinfo_model();
 	if (!model) {
-		fprintf(stderr, "firmware: device-name in system-info.json names no player this build knows"
-						" ('%s'); no update file will be looked for\n",
+		fprintf(stderr,
+				"firmware: device-name in system-info.json names no player this build knows"
+				" ('%s'); no update file will be looked for\n",
 				sysinfo_device_name());
 		return NULL;
 	}
@@ -105,6 +108,95 @@ bool firmware_update_file_find(char *out, size_t out_size) {
 		return false;
 	}
 	return find_in_dir(root, name, out, out_size);
+}
+
+// The part of the model name that survives every image build: "HiBy R1" and
+// "HiBy R3", from system-info.json's "HiBy R1" and "HiBy R3 Pro II". The
+// stock R3 image spells it "HiBy R3PROII", so the full name would miss a
+// stock image and refuse a legitimate rollback.
+static void model_marker(const char *name, char *out, size_t size) {
+	const char *first = strchr(name, ' ');
+	if (!first) {
+		snprintf(out, size, "%s", name);
+		return;
+	}
+	const char *second = strchr(first + 1, ' ');
+	size_t len = second ? (size_t)(second - name) : strlen(name);
+	if (len >= size) {
+		len = size - 1;
+	}
+	memcpy(out, name, len);
+	out[len] = '\0';
+}
+
+// Case-insensitive search across chunk boundaries. An image is tens of
+// megabytes, so it is read a piece at a time; the last need-1 bytes stay in
+// the buffer to catch a name split between two reads.
+static bool file_contains(const char *path, const char *needle) {
+	size_t need = strlen(needle);
+	if (need == 0) {
+		return false;
+	}
+
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		return false;
+	}
+
+	char buf[8192];
+	size_t have = 0;
+	bool found = false;
+	while (!found) {
+		size_t n = fread(buf + have, 1, sizeof(buf) - have, f);
+		if (n == 0) {
+			break;
+		}
+		have += n;
+		for (size_t i = 0; i + need <= have; i++) {
+			size_t j = 0;
+			while (j < need && tolower((unsigned char)buf[i + j]) == tolower((unsigned char)needle[j])) {
+				j++;
+			}
+			if (j == need) {
+				found = true;
+				break;
+			}
+		}
+		if (found || have < need - 1) {
+			break;
+		}
+		memmove(buf, buf + have - (need - 1), need - 1);
+		have = need - 1;
+	}
+	fclose(f);
+	return found;
+}
+
+ota_result_t firmware_update_model_check(const char *path) {
+	if (!path || !*path) {
+		return OTA_MODEL_MISMATCH;
+	}
+
+	const char *stem = firmware_update_stem();
+	if (!stem || !*stem) {
+		return OTA_NO_MODEL;
+	}
+
+	const char *base = strrchr(path, '/');
+	base = base ? base + 1 : path;
+	char wanted[80];
+	snprintf(wanted, sizeof(wanted), "%s.upt", stem);
+	if (strcasecmp(base, wanted) != 0) {
+		return OTA_MODEL_MISMATCH;
+	}
+
+	const sysinfo_model_t *model = sysinfo_model();
+	if (!model || !model->name[0]) {
+		return OTA_NO_MODEL;
+	}
+	char marker[32];
+	model_marker(model->name, marker, sizeof(marker));
+	return file_contains(path, marker) ? OTA_OK : OTA_MODEL_MISMATCH;
 }
 
 bool firmware_update_start(void) {

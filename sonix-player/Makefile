@@ -477,6 +477,20 @@ $(AXPCHARGE_TEST_BIN): tools/test_axpcharge.c src/system/device/axpcharge.c \
 	$(CC) $(CFLAGS) -DHOST_BUILD=1 -DAXPCHARGE_TEST=1 -o $@ \
 		tools/test_axpcharge.c src/system/device/axpcharge.c -lpthread
 
+# ---------------------------------------------------------------------------
+# SD-card update checks on the host. Test-only: no part of host or target.
+# ---------------------------------------------------------------------------
+FIRMWARE_TEST_BIN = build_host/test_firmware_update
+.PHONY: test-firmware-update
+test-firmware-update: $(FIRMWARE_TEST_BIN)
+	$(FIRMWARE_TEST_BIN)
+
+$(FIRMWARE_TEST_BIN): tests/firmware_update_test.c src/system/device/firmware.c \
+		src/system/device/firmware.h src/system/device/ota.h src/system/core/sha256.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DHOST_BUILD=1 -o $@ \
+		tests/firmware_update_test.c src/system/device/firmware.c src/system/core/sha256.c
+
 # The bundled libraries and their extracted sources. The downloaded tarballs stay.
 .PHONY: libs-clean
 libs-clean:
