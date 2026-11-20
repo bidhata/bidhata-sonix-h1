@@ -226,7 +226,7 @@ This is everything Bidhata's Modded SonixOS can do today, on both the **R1** and
 ## System
 
 - **Date and time** - automatic over Wi-Fi (the time zone is found by itself) or set by hand, with 24-hour or AM/PM clock and daylight saving time.
-- **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Polski, Português BR, Čeština, Russian, Chinese and Japanese.
+- **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Polski, Português BR, Čeština, Russian, Українська, Chinese and Japanese.
 - **Other scripts** - titles and subtitles in Korean, Thai, Arabic, Hebrew and Hindi are shown as well. Hindi (Devanagari) has its letters drawn one after another rather than joined as in print.
 - **Firmware update** - over the internet with the full list of changes, or from a `.upt` file on the card. Either way the image is read before recovery is armed and one meant for the other player is refused, since the wrong one does not boot.
 - **About** - device, serial number, card space and version.
