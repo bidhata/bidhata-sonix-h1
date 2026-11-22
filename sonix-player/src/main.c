@@ -84,6 +84,46 @@ static void host_shot_poll_cb(lv_timer_t *timer) {
 		screenshot_request();
 	}
 }
+
+// The accent picker without a finger, for the headless screenshots:
+// SONIX_ACCENT_HSV="h,sat,val" (0..359, 0..100, 0..100) commits a custom
+// accent through the same call OK uses, SONIX_OPEN_APPEARANCE opens the page
+// the swatches live on, and SONIX_OPEN_ACCENT opens the picker over it.
+#include "src/gui/settings/accentpage.h"
+#include "src/gui/settings/appearance.h"
+#include "src/gui/shell/switcher.h"
+#include "src/gui/shell/theme.h"
+#include "src/gui/shell/theme_color.h"
+
+static void host_apply_accent_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	const char *spec = getenv("SONIX_ACCENT_HSV");
+	unsigned h = 0, s = 0, v = 0;
+	if (!spec || sscanf(spec, "%u,%u,%u", &h, &s, &v) != 3) {
+		return;
+	}
+	if (h > 359) {
+		h = 359;
+	}
+	if (s > 100) {
+		s = 100;
+	}
+	if (v > 100) {
+		v = 100;
+	}
+	theme_set_accent_custom(
+		theme_color_hsv((uint16_t)h, (uint8_t)((s * 255u + 50u) / 100u), (uint8_t)((v * 255u + 50u) / 100u)));
+}
+
+static void host_open_appearance_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(appearance_screen);
+}
+
+static void host_open_accent_cb(lv_timer_t *timer) {
+	lv_timer_delete(timer);
+	switch_screen(accentpage_screen);
+}
 #endif
 
 // "Remember track", deferred: restoring the remembered track kicks off a cover
@@ -2286,6 +2326,17 @@ int main(int argc, char **argv) {
 
 #ifdef HOST_BUILD
 	lv_timer_create(host_shot_poll_cb, 200, NULL); // see host_shot_poll_cb
+	// Screenshot hooks, in the order a person would walk them: commit a colour
+	// first, then open the page that shows it or the picker itself.
+	if (getenv("SONIX_ACCENT_HSV")) {
+		lv_timer_create(host_apply_accent_cb, 1200, NULL);
+	}
+	if (getenv("SONIX_OPEN_APPEARANCE")) {
+		lv_timer_create(host_open_appearance_cb, 1800, NULL);
+	}
+	if (getenv("SONIX_OPEN_ACCENT")) {
+		lv_timer_create(host_open_accent_cb, 2400, NULL);
+	}
 #endif
 
 	// The media player bluez shows to the headphones. After gui_init, because

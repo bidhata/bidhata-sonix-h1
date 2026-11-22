@@ -1444,7 +1444,7 @@ static void circle_button_set_on(lv_obj_t *btn, bool on) {
 		lv_obj_set_style_bg_color(btn, theme()->accent, 0);
 		lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
 		if (icon) {
-			lv_obj_set_style_image_recolor(icon, lv_color_white(), 0);
+			lv_obj_set_style_image_recolor(icon, theme_on_accent(), 0);
 		}
 	} else {
 		lv_obj_remove_local_style_prop(btn, LV_STYLE_BG_COLOR, 0);

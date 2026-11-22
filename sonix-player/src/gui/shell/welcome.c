@@ -182,6 +182,7 @@ static void start_cb(lv_event_t *e) {
 static void refresh_theme(void) {
 	if (start_btn) {
 		lv_obj_set_style_bg_color(start_btn, theme()->accent, 0);
+		lv_obj_set_style_text_color(start_label, theme_on_accent(), 0);
 	}
 }
 
@@ -228,7 +229,7 @@ void welcome_init(gui_config_t *cfg) {
 	start_label = lv_label_create(start_btn);
 	lv_label_set_text(start_label, tr("welcome_start"));
 	lv_obj_set_style_text_font(start_label, &font_ui_24, 0);
-	lv_obj_set_style_text_color(start_label, lv_color_white(), 0);
+	lv_obj_set_style_text_color(start_label, theme_on_accent(), 0);
 	lv_obj_center(start_label);
 
 	theme_register_refresh(refresh_theme);

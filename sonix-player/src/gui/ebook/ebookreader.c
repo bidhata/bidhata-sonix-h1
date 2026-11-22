@@ -2270,7 +2270,7 @@ static void stepper_button(lv_obj_t *parent, const char *glyph, int which, bool 
 
 	lv_obj_t *label = lv_label_create(btn);
 	lv_label_set_text(label, glyph);
-	lv_obj_set_style_text_color(label, lv_color_white(), 0);
+	lv_obj_set_style_text_color(label, theme_on_accent(), 0);
 	lv_obj_set_style_text_font(label, &font_ui_24, 0);
 	lv_obj_center(label);
 }

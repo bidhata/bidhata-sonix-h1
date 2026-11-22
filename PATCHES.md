@@ -323,3 +323,38 @@ Two differences worth writing down, neither of which needed code:
 
 `GBINPUT_MAX_CONTACTS` stays 5 on both players. It is an array size, not a
 request, and a driver that reports two fills two slots.
+
+## Custom accent colour
+
+The colour can be any colour, not only the six presets, and the choice lives in
+`device_config.ini` beside the preset index:
+
+| key | value | meaning |
+|---|---|---|
+| `ui/accent` | 0..5 | the preset in use, or the closest one to the custom colour |
+| `ui/accent_custom` | 0 / 1 | the custom colour is active |
+| `ui/accent_rgb` | 0..0xFFFFFF | the chosen colour, decimal in the INI |
+
+A seventh swatch on Appearance, and the Custom colour row under it, open the
+picker: a preview circle with the interface's own foreground on it, then hue,
+saturation and brightness strips.
+
+`ui/accent` keeps meaning what it always meant, a preset index from 0 to 5, so
+the stock boot-logo marker still holds a value it understands; a custom colour
+never writes 6 or more into it. A custom accent is paired with the **closest
+preset** by hue, and that preset is what the boot logo draws, since
+there is no custom boot-logo artwork.
+
+Dragging a slider on the picker only previews. The page changes the live
+palette and redraws, and nothing is stored: no `config_save()`, no write to the
+boot-logo marker. The config and the NAND marker are written **once**, when OK
+is pressed. Leaving the page any other way restores the accent that was
+persisted before it opened.
+
+A missing, non-numeric or out-of-range `ui/accent_rgb`, or `ui/accent_custom`
+set with no usable colour, falls back to the preset in `ui/accent`. Nothing can
+leave the player with no accent.
+
+The colour maths has a host test, `make test-theme-color` in `sonix-player`,
+covering the HSV conversion, the black-or-white foreground on an accent fill,
+the nearest-preset search and the range check on the stored value.

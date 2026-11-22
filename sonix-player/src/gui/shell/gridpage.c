@@ -264,7 +264,7 @@ lv_obj_t *gridpage_empty_panel(lv_obj_t *screen, gui_config_t *cfg, const lv_ima
 	lv_obj_t *button_label = lv_label_create(button);
 	lv_label_set_text(button_label, tr("scan"));
 	lv_obj_set_style_text_font(button_label, &font_ui_24, 0);
-	lv_obj_set_style_text_color(button_label, lv_color_white(), 0);
+	lv_obj_set_style_text_color(button_label, theme_on_accent(), 0);
 	lv_obj_center(button_label);
 
 	empty_panel_t *state = calloc(1, sizeof(*state));
