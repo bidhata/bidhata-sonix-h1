@@ -201,7 +201,7 @@ This is everything Bidhata's Modded SonixOS can do today, on both the **R1** and
 - **Double click** - two quick presses of a button do the action you choose.
 - **In-line remote** - on wired headphones: one click play/pause, two clicks next, three clicks previous; hold the button to jump back 10 s, or click and then hold to jump forward 30 s. USB-C headphones with buttons work too (clicks only).
 - **Lock the buttons** with the screen off: volume down + power. The power button and the remote always work.
-- **Keyboard** - eleven layouts (English, Italian, German, Spanish, French, Dutch, Polish, Brazilian Portuguese, Czech, Russian, Japanese), as a full keyboard or as a phone keypad (T9). Japanese types romaji as hiragana or katakana, has a ten-key kana pad (tap a key again, or flick it, for the next kana of its row) and offers kanji candidates for the hiragana before the caret.
+- **Keyboard** - eleven layouts (English, Italian, German, Spanish, French, Dutch, Polish, Portuguese, Czech, Russian, Japanese), as a full keyboard or as a phone keypad (T9). Japanese types romaji as hiragana or katakana, has a ten-key kana pad (tap a key again, or flick it, for the next kana of its row) and offers kanji candidates for the hiragana before the caret.
 - **Screenshots** - turn them on in Settings > More, then press volume up + power to save the screen to the card.
 
 ## Screen and appearance
@@ -226,7 +226,7 @@ This is everything Bidhata's Modded SonixOS can do today, on both the **R1** and
 ## System
 
 - **Date and time** - automatic over Wi-Fi (the time zone is found by itself) or set by hand, with 24-hour or AM/PM clock and daylight saving time.
-- **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Norsk, Polski, Português BR, Čeština, Russian, Українська, Chinese and Japanese.
+- **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Norsk, Polski, Português BR, Português PT, Čeština, Russian, Українська, Chinese and Japanese.
 - **Other scripts** - titles and subtitles in Korean, Thai, Arabic, Hebrew and Hindi are shown as well. Hindi (Devanagari) has its letters drawn one after another rather than joined as in print.
 - **Firmware update** - over the internet with the full list of changes, or from a `.upt` file on the card. Either way the image is read before recovery is armed and one meant for the other player is refused, since the wrong one does not boot.
 - **About** - device, serial number, card space and version.
