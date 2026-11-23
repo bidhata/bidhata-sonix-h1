@@ -8,8 +8,9 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Supported audio formats
 
-`.wav` `.flac` `.mp3` `.ogg` `.opus` `.m4a` `.m4b` `.mp4` `.aac` `.wv` `.wvc` `.ape` `.dsf` `.dff` `.aif` `.aiff` `.aifc` `.caf`
+`.wav` `.flac` `.mp3` `.ogg` `.opus` `.m4a` `.m4b` `.mp4` `.aac` `.wv` `.wvc` `.ape` `.dsf` `.dff` `.iso` `.aif` `.aiff` `.aifc` `.caf`
 
+- **SACD ISO** - the stereo area of an SACD image is imported as an album, one track per SACD track, with the image's own titles, artist, year and genre. DSD and DST images both play; multichannel-only images are skipped.
 - **CUE sheets** - a whole disc ripped into one file with a `.cue` next to it shows up as separate tracks.
 - **Tags in WAV and AIFF** are read too, cover included.
 

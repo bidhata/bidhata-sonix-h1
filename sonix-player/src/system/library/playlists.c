@@ -2,6 +2,7 @@
 
 #include "src/system/decode/decode.h"
 #include "src/system/library/cue.h"
+#include "src/system/decode/sacd_iso.h"
 #include "src/system/library/library.h"
 #include "src/system/library/metadata.h"
 #include "src/system/playback/playlist.h"
@@ -508,6 +509,11 @@ static bool entry_is_present(const char *path) {
 	char sheet[512];
 	if (cue_split_path(path, sheet, sizeof(sheet)) > 0) {
 		return access(sheet, F_OK) == 0;
+	}
+	// A track of an SACD image is named by its image, the same way.
+	char iso[512];
+	if (sacd_split_path(path, iso, sizeof(iso)) > 0) {
+		return access(iso, F_OK) == 0;
 	}
 	// The extension too, and by the queue's own list: a playlist made on a
 	// computer can name a .wma or a .m4v, which is a row that does nothing for

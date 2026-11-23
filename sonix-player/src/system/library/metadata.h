@@ -53,6 +53,14 @@ typedef struct {
 // into two shelves.
 void metadata_read(const char *filepath, song_metadata_t *out);
 
+// Reads the tags of one track of a SACD ISO image: `path` is the image itself
+// or a virtual track path ("...iso?sacd=3"), and the tags come from the
+// image's text sectors -- the album title and artist from the master text,
+// the track's title and performer from the stereo area's track text. Returns
+// false when the image is not a SACD with that track. Fills `out` and nothing
+// else, like metadata_read().
+bool metadata_read_sacd(const char *path, song_metadata_t *out);
+
 // The artist to show for the track. By default the album's artist when the
 // tags have one, since that is the name the record is filed under -- except on
 // a compilation, where the album is credited to "Various Artists" or the like

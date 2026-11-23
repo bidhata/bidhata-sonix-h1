@@ -3,6 +3,7 @@
 #include "src/system/library/cue.h"
 #include "src/system/decode/decode.h"
 #include "src/system/decode/mp4.h"
+#include "src/system/decode/sacd_iso.h"
 #include "src/system/decode/apedec.h"
 #include "src/system/library/oggtags.h"
 #include "src/system/core/utils.h"
@@ -1067,6 +1068,11 @@ static bool read_mp4_embedded(const char *filepath, albumart_t *out) {
 // Reads the picture stored inside the file's own tags, if the format has a
 // place for one.
 static bool read_embedded(const char *filepath, albumart_t *out) {
+	// A SACD ISO has no tag of its own to hold a picture: the artwork is a
+	// file beside the image, which the folder fallback finds.
+	if (sacd_is_iso(filepath)) {
+		return false;
+	}
 	switch (decode_detect_format(filepath)) {
 	case DECODE_FORMAT_MP3:
 	case DECODE_FORMAT_AAC_ADTS:

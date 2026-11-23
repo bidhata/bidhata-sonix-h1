@@ -7,6 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "sacd_iso.h"
+
 // The container, the bit order, and the two ways out: DoP packing, and the
 // lookup-table filter to PCM (see dsd.h).
 
@@ -24,6 +26,7 @@
 
 struct dsd_file {
 	int fd;
+	sacd_iso_t *sacd; // when the bytes come from an SACD image, not a file
 
 	int channels;
 	uint32_t rate;	 // the DSD rate
@@ -211,6 +214,22 @@ static bool parse_dff(dsd_file_t *d) {
 static bool fill_channels(dsd_file_t *d) {
 	d->chan_read = 0;
 	d->chan_len = 0;
+
+	// The image reader de-interleaves into the per-channel buffers itself,
+	// so this branch has no slab of its own to split.
+	if (d->sacd) {
+		uint64_t left = d->pos_bytes < d->bytes_per_ch
+					? d->bytes_per_ch - d->pos_bytes
+					: 0;
+		int want = (int)(left < READ_BYTES ? left : READ_BYTES);
+		uint64_t got = sacd_iso_read(d->sacd, d->chan, (uint64_t)want);
+		if (got == 0) {
+			return false;
+		}
+		d->pos_bytes += got;
+		d->chan_len = (int)got;
+		return true;
+	}
 
 	if (d->pos_bytes >= d->bytes_per_ch) {
 		return false;
@@ -516,7 +535,67 @@ bool dsd_is_pcm(const dsd_file_t *d) { return d && d->pcm_mode; }
 // public
 // ---------------------------------------------------------------------------
 
+dsd_file_t *dsd_open_sacd(const char *path) {
+	int track = sacd_split_path(path, NULL, 0);
+	if (track <= 0) {
+		track = 1; // a plain .iso is track 1 of the stereo area
+	}
+
+	sacd_iso_t *sacd = sacd_iso_open(path);
+	if (!sacd) {
+		return NULL;
+	}
+	int area = sacd_iso_stereo_area(sacd);
+	if (area < 0 || !sacd_iso_select(sacd, area, track)) {
+		sacd_iso_close(sacd);
+		return NULL;
+	}
+
+	dsd_file_t *d = calloc(1, sizeof(*d));
+	if (!d) {
+		sacd_iso_close(sacd);
+		return NULL;
+	}
+	d->fd = -1;
+	d->sacd = sacd;
+	d->channels = 2;
+	d->rate = DSD64_RATE;
+	d->multiple = 64;
+	d->lsb_first = false;
+	d->planar = false;
+	d->bytes_per_ch = sacd_iso_track_bytes(sacd);
+	if (d->bytes_per_ch == 0) {
+		dsd_close(d);
+		return NULL;
+	}
+
+	d->out_rate = (int)(d->rate / 16);
+	d->total_out = d->bytes_per_ch / 2;
+
+	d->pcm_capacity = 4096;
+	d->pcm = calloc((size_t)d->pcm_capacity * d->channels, sizeof(int32_t));
+	for (int c = 0; c < d->channels; c++) {
+		d->chan[c] = malloc(READ_BYTES);
+		if (!d->chan[c]) {
+			dsd_close(d);
+			return NULL;
+		}
+	}
+	if (!d->pcm) {
+		dsd_close(d);
+		return NULL;
+	}
+
+	printf("dsd: sacd track %d DSD%d %u Hz %d ch -> DoP %d Hz\n", track, d->multiple, d->rate,
+		   d->channels, d->out_rate);
+	return d;
+}
+
 dsd_file_t *dsd_open(const char *path) {
+	if (sacd_split_path(path, NULL, 0) > 0 || sacd_is_iso(path)) {
+		return dsd_open_sacd(path);
+	}
+
 	dsd_file_t *d = calloc(1, sizeof(*d));
 	if (!d) {
 		return NULL;
@@ -584,6 +663,7 @@ void dsd_close(dsd_file_t *d) {
 	}
 	free(d->raw);
 	free(d->pcm);
+	sacd_iso_close(d->sacd);
 	if (d->fd >= 0) {
 		close(d->fd);
 	}
@@ -635,6 +715,11 @@ bool dsd_seek(dsd_file_t *d, uint64_t frame) {
 		target = d->bytes_per_ch;
 	}
 	target -= target % step;
+	if (d->sacd && !sacd_iso_seek(d->sacd, target)) {
+		return false;
+	}
+	// Only once the seek has landed: a failed one leaves the stream where it
+	// was, and its filter history is still what belongs in front of it.
 	if (d->pcm_mode) {
 		history_clear(d);
 	}

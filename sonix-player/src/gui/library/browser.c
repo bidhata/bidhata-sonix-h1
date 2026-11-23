@@ -27,6 +27,7 @@
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/system/library/cue.h"
+#include "src/system/decode/sacd_iso.h"
 #include "src/system/library/folderorder.h"
 #include "src/system/playback/device_state.h"
 #include "src/gui/shell/toast.h"
@@ -539,7 +540,7 @@ static bool is_playable_file(const char *name) {
 	// which opens the container anyway (see is_video_file in library.c).
 	static const char *const playable_exts[] = {".wav",  ".mp3",  ".flac", ".ogg", ".m4b", ".m4a",
 												 ".alac", ".aac",  ".dsf",  ".dff", ".aif", ".aiff",
-												 ".aifc", ".caf",  ".opus", ".wv",   ".ape"};
+												 ".aifc", ".caf",  ".opus", ".wv",   ".ape", ".iso"};
 
 	if (playlist_is_junk_name(name)) {
 		return false; // a macOS resource fork with a .flac on the end is not a track
@@ -553,6 +554,24 @@ static bool is_playable_file(const char *name) {
 }
 
 static void browser_open_dir(const char *path);
+
+// Whether the browser lists `name` in `dir`: the name alone for everything
+// else, but an image has to be opened -- a data .iso is not music, and a SACD
+// image with no stereo area has nothing this player can play.
+static bool is_browsable_file(const char *dir, const char *name) {
+	if (!is_playable_file(name)) {
+		return false;
+	}
+	if (!sacd_is_iso(name)) {
+		return true;
+	}
+	char path[PATH_BUF + 260];
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	sacd_iso_t *s = sacd_iso_open(path);
+	bool ok = s && sacd_iso_stereo_area(s) >= 0;
+	sacd_iso_close(s);
+	return ok;
+}
 
 // Scroll positions remembered while walking DOWN the tree, restored on the
 // way back up -- so going into an album and back does not land at the top of
@@ -1220,7 +1239,7 @@ static bool list_directory(const char *path, listing_t *out, cue_sheet_t *sheets
 			is_dir = true;
 		} else if (de->d_type == DT_REG || de->d_type == DT_LNK) {
 			is_dir = false;
-		} else if (is_playable_file(de->d_name)) {
+		} else if (is_browsable_file(path, de->d_name)) {
 			is_dir = false;
 		} else {
 			char entry_path[PATH_BUF + sizeof(de->d_name) + 1];
@@ -1234,7 +1253,7 @@ static bool list_directory(const char *path, listing_t *out, cue_sheet_t *sheets
 			is_dir = S_ISDIR(st.st_mode);
 		}
 
-		if (!is_dir && !is_playable_file(de->d_name)) {
+		if (!is_dir && !is_browsable_file(path, de->d_name)) {
 			continue; // unplayable files are not listed
 		}
 

@@ -11,6 +11,7 @@
 #include "dsd.h"
 #include "mp4.h"
 #include "opusdec.h"
+#include "sacd_iso.h"
 #include "sndfile.h"
 #include "wavpackdec.h"
 #include "apedec.h"
@@ -693,6 +694,8 @@ static decode_format_t format_by_name(const char *filepath) {
 		return DECODE_FORMAT_AAC_MP4;
 	if (has_extension(filepath, ".dsf") || has_extension(filepath, ".dff"))
 		return DECODE_FORMAT_DSD;
+	if (has_extension(filepath, ".iso"))
+		return DECODE_FORMAT_DSD; // a SACD image; see sacd_iso.h
 	if (has_extension(filepath, ".opus"))
 		return DECODE_FORMAT_OPUS;
 	if (has_extension(filepath, ".wv"))
@@ -709,6 +712,13 @@ static decode_format_t format_by_name(const char *filepath) {
 }
 
 decode_format_t decode_detect_format(const char *filepath) {
+	// A track of a SACD ISO is a DSD stream inside the image, decoded by the
+	// DSD path below. The virtual path names the image, not a file to sniff.
+	char iso[600];
+	if (sacd_split_path(filepath, iso, sizeof(iso)) > 0) {
+		return DECODE_FORMAT_DSD;
+	}
+
 	// A track of a CUE sheet is named by the sheet; what decides the format is
 	// the audio file the sheet points at.
 	char sheet[512];
@@ -2022,6 +2032,14 @@ static decoder_t *decoder_open_file(const char *filepath, decode_format_t format
 	snprintf(dec->path, sizeof(dec->path), "%s", filepath ? filepath : "");
 	snprintf(dec->file, sizeof(dec->file), "%s", dec->path);
 
+	// A SACD track is a stretch of the image, not a file of its own: what
+	// re-reads the audio by name -- the MP3 index, the bitrate probes -- wants
+	// the image. dsd_open() is given the virtual path and finds the track.
+	char iso[sizeof(dec->file)];
+	if (sacd_split_path(dec->path, iso, sizeof(iso)) > 0) {
+		snprintf(dec->file, sizeof(dec->file), "%s", iso);
+	}
+
 	switch (format) {
 	case DECODE_FORMAT_MP3:
 		dec->impl.mp3 = malloc(sizeof(*dec->impl.mp3));
@@ -2465,6 +2483,13 @@ int decoder_sample_rate(const decoder_t *dec) { return dec->sample_rate; }
 
 bool decoder_source_span(const decoder_t *dec, char *file, size_t size, double *begin, double *end) {
 	if (!dec || dec->growing || !dec->file[0] || !file || size == 0) {
+		return false;
+	}
+	// A SACD track is not a byte span of an ordinary file: the image holds
+	// several areas and the track is located through the TOC, so there is no
+	// range to hand out.
+	char iso[600];
+	if (sacd_split_path(dec->path, iso, sizeof(iso)) > 0 || sacd_is_iso(dec->path)) {
 		return false;
 	}
 	snprintf(file, size, "%s", dec->file);

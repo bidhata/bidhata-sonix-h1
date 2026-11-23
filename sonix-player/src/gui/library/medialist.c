@@ -1700,9 +1700,9 @@ static void delete_confirmed(void *user) {
 	int deleted = 0;
 	for (int i = 0; gone && i < wanted; i++) {
 		const char *path = delete_pending.paths[i];
-		// A track of a cue sheet is a stretch of a file that holds the others
-		// too: there is nothing of its own to delete.
-		if (strstr(path, "?track=")) {
+		// A track of a cue sheet or an SACD image is a stretch of a file that
+		// holds the others too: there is nothing of its own to delete.
+		if (strstr(path, "?track=") || strstr(path, "?sacd=")) {
 			continue;
 		}
 		if (unlink(path) == 0 || errno == ENOENT) {

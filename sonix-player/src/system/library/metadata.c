@@ -3,6 +3,7 @@
 #include "src/system/library/cue.h"
 #include "src/system/decode/decode.h"
 #include "src/system/decode/mp4.h"
+#include "src/system/decode/sacd_iso.h"
 #include "src/system/decode/apedec.h"
 #include "src/system/library/oggtags.h"
 #include "src/system/image/miniz/miniz_tinfl.h"
@@ -1934,6 +1935,75 @@ static void read_dsd_metadata(const char *filepath, song_metadata_t *out) {
 }
 
 // ---------------------------------------------------------------------------
+// SACD ISO
+//
+// An image carries its text in two places: the master TOC's text sector names
+// the album and the artist it is filed under, and the stereo area's track text
+// names each track and its performer. Both are plain ISO-8859-1 (or a handful
+// of other code pages) and are already decoded by sacd_iso.c, so this is only
+// a matter of asking for the right track and copying the fields out.
+// ---------------------------------------------------------------------------
+
+// The image's own name without its ".iso", for an image whose text sectors name
+// no album. "disc.iso" is a better album than nothing, and the library files
+// the image under the same name (scan_sacd_iso() in library.c).
+static void album_from_image(const char *iso, char *out, size_t out_size) {
+	const char *slash = strrchr(iso, '/');
+	const char *name = slash ? slash + 1 : iso;
+	const char *dot = strrchr(name, '.');
+	size_t len = dot ? (size_t)(dot - name) : strlen(name);
+	if (len >= out_size) {
+		len = out_size - 1;
+	}
+	memcpy(out, name, len);
+	out[len] = '\0';
+}
+
+bool metadata_read_sacd(const char *path, song_metadata_t *out) {
+	if (!path || !out) {
+		return false;
+	}
+	memset(out, 0, sizeof(*out));
+
+	sacd_iso_t *s = sacd_iso_open(path);
+	if (!s) {
+		return false;
+	}
+
+	char iso[600];
+	int track = sacd_split_path(path, iso, sizeof(iso));
+	if (track <= 0) {
+		track = 1; // a plain .iso: its first track
+	}
+
+	int area = sacd_iso_stereo_area(s);
+	if (area < 0 || !sacd_iso_select(s, area, track)) {
+		sacd_iso_close(s);
+		return false;
+	}
+
+	const sacd_area_t *a = sacd_iso_area(s, area);
+	const sacd_track_t *t = a ? &a->tracks[track - 1] : NULL;
+	const char *album_artist = sacd_iso_album_artist(s);
+	const char *performer = t && t->performer[0] ? t->performer : album_artist;
+
+	snprintf(out->title, sizeof(out->title), "%s", t ? t->title : "");
+	snprintf(out->artist, sizeof(out->artist), "%s", performer);
+	snprintf(out->album, sizeof(out->album), "%s", sacd_iso_album_title(s));
+	if (!out->album[0]) {
+		album_from_image(iso, out->album, sizeof(out->album));
+	}
+	snprintf(out->album_artist, sizeof(out->album_artist), "%s", album_artist);
+	snprintf(out->genre, sizeof(out->genre), "%s", sacd_iso_genre(s));
+	out->year = sacd_iso_year(s);
+	out->track_number = track;
+	out->has_tags = out->title[0] || out->artist[0] || out->album[0] || out->genre[0];
+
+	sacd_iso_close(s);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // WAV and AIFF
 //
 // WAV's own tags are the RIFF LIST/INFO chunk, and its text has no declared
@@ -2489,6 +2559,17 @@ static void clean_fields(song_metadata_t *out) {
 
 void metadata_read(const char *filepath, song_metadata_t *out) {
 	memset(out, 0, sizeof(*out));
+
+	// Any .iso goes to the SACD reader, because a track of an image is named
+	// by a virtual path and cannot be sniffed. A data image is not an SACD
+	// one, so the reader finds nothing and yields no tags; the library scan
+	// ignores such a file rather than indexing it.
+	char iso[600];
+	if (sacd_split_path(filepath, iso, sizeof iso) > 0 || sacd_is_iso(filepath)) {
+		metadata_read_sacd(filepath, out);
+		clean_fields(out);
+		return;
+	}
 
 	if (read_cue_metadata(filepath, out)) {
 		clean_fields(out);

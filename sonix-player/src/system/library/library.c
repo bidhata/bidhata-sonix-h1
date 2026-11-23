@@ -21,6 +21,7 @@
 #include "src/system/core/config.h"
 #include "src/system/db/sqlite3.h"
 #include "src/system/library/cue.h"
+#include "src/system/decode/sacd_iso.h"
 #include "src/system/decode/mp4.h"
 #include "src/system/decode/apedec.h"
 #include "src/system/library/metadata.h"
@@ -3385,7 +3386,7 @@ static void namelist_free(namelist_t *l) {
 static bool is_playable(const char *name) {
 	static const char *const EXTENSIONS[] = {".wav",  ".mp3", ".flac", ".ogg",  ".dsf",  ".dff",
 											 ".aif",  ".aiff", ".aifc", ".caf", ".opus", ".wv",
-											 ".m4a",  ".alac", ".aac",  ".ape",  ".cue"};
+											 ".m4a",  ".alac", ".aac",  ".ape",  ".cue", ".iso"};
 
 	for (size_t i = 0; i < sizeof(EXTENSIONS) / sizeof(EXTENSIONS[0]); i++) {
 		if (has_extension(name, EXTENSIONS[i])) {
@@ -3565,6 +3566,13 @@ static void probe_stream_format(const char *path, const char *filename, int *rat
 // Which format code the row records, matching the stock numbering where it has
 // one. The column is informational: nothing outside this file reads it.
 static int format_of(const char *name) {
+	// An SACD image, and any track of one, is DSD: the badge must not come out
+	// as WAV for the .iso container. sacd_is_iso() alone would do for every
+	// path this player makes; the split is kept for a non-.iso base carrying a
+	// virtual suffix, which is still a track of the image it names.
+	if (sacd_split_path(name, NULL, 0) > 0 || sacd_is_iso(name)) {
+		return FORMAT_DSD;
+	}
 	if (has_extension(name, ".flac")) {
 		return FORMAT_FLAC;
 	}
@@ -4715,6 +4723,24 @@ static void folder_mark(const char *path, time_t mtime, const folder_sig_t *sig)
 	}
 }
 
+// Where the virtual track suffix starts: "?track=" for a CUE sheet, "?sacd="
+// for an SACD image, whichever comes first.
+static size_t virtual_track_len(const char *path) {
+	const char *a = strstr(path, "?track=");
+	const char *b = strstr(path, "?sacd=");
+	const char *m = a && b ? (a < b ? a : b) : (a ? a : b);
+	return m ? (size_t)(m - path) : strlen(path);
+}
+
+// The file a virtual track path stands for. `size` must be greater than zero.
+static void virtual_track_base(const char *path, char *out, size_t size) {
+	size_t n = virtual_track_len(path);
+	if (n >= size)
+		n = size - 1;
+	memcpy(out, path, n);
+	out[n] = '\0';
+}
+
 // Whether FOLDER_TABLE has `path` holding the same names. The folder's own
 // modification time is not compared: it also moves for a cover, a log or a
 // hidden file, none of which is the walk's business, and a file replaced under
@@ -4799,6 +4825,90 @@ static bool scan_cue_sheet(const char *path, const struct stat *st) {
 	return indexed;
 }
 
+// A whole SACD in one image, split by its own table of contents.
+//
+// Like a CUE sheet, each track becomes its own row pointing at a virtual path
+// -- the image plus a track number -- that the decoder turns back into a window
+// onto the audio. The stereo area is the one indexed: the multichannel area is
+// the same performance, and the player has one output stage.
+//
+// Returns false when the image has no stereo area to index, and the caller then
+// treats it as a file it cannot use.
+static bool scan_sacd_iso(const char *path, const struct stat *st) {
+	sacd_iso_t *s = sacd_iso_open(path);
+	if (!s) {
+		printf("library: %s is not a SACD image\n", path);
+		return false;
+	}
+
+	int area = sacd_iso_stereo_area(s);
+	if (area < 0) {
+		printf("library: %s has no stereo SACD area, skipped\n", path);
+		sacd_iso_close(s);
+		return false;
+	}
+	const sacd_area_t *a = sacd_iso_area(s, area);
+	if (!a) {
+		sacd_iso_close(s);
+		return false;
+	}
+
+	// The album title, or the image's own name: "disc.iso" is a better album
+	// than nothing.
+	char album[256];
+	snprintf(album, sizeof(album), "%s", sacd_iso_album_title(s));
+	if (!album[0]) {
+		const char *slash = strrchr(path, '/');
+		snprintf(album, sizeof(album), "%s", slash ? slash + 1 : path);
+		char *dot = strrchr(album, '.');
+		if (dot) {
+			*dot = '\0';
+		}
+	}
+
+	// What format_of() reads, and what a row is filed under: the image's name.
+	// Passing the track's title would leave the row without its DSD badge.
+	const char *slash = strrchr(path, '/');
+	const char *base_name = slash ? slash + 1 : path;
+
+	const char *album_artist = sacd_iso_album_artist(s);
+	const char *genre = sacd_iso_genre(s);
+	int year = sacd_iso_year(s);
+	int indexed_count = 0;
+
+	for (int i = 1; i <= a->track_count; i++) {
+		const sacd_track_t *t = &a->tracks[i - 1];
+		if (t->frames == 0) {
+			continue; // no audio to index: the TOC lists it but nothing plays
+		}
+
+		char vpath[600];
+		sacd_virtual_path(path, i, vpath, sizeof(vpath));
+
+		song_metadata_t tags;
+		memset(&tags, 0, sizeof(tags));
+		snprintf(tags.title, sizeof(tags.title), "%s", t->title);
+		if (!tags.title[0]) {
+			snprintf(tags.title, sizeof(tags.title), "%02d", i);
+		}
+		snprintf(tags.artist, sizeof(tags.artist), "%s", t->performer[0] ? t->performer : album_artist);
+		snprintf(tags.album, sizeof(tags.album), "%s", album);
+		snprintf(tags.album_artist, sizeof(tags.album_artist), "%s", album_artist);
+		snprintf(tags.genre, sizeof(tags.genre), "%s", genre);
+		tags.year = year;
+		tags.track_number = i;
+		tags.has_tags = tags.title[0] || tags.artist[0] || tags.album[0];
+
+		scan_indexed(vpath, base_name, &tags, st);
+		indexed_count++;
+	}
+
+	printf("library: %s holds %d SACD tracks\n", path, indexed_count);
+	bool indexed = indexed_count > 0;
+	sacd_iso_close(s);
+	return indexed;
+}
+
 static void scan_one_file(const char *child, const char *name, const struct stat *st) {
 	// Before the file is touched, not after: what is wanted is the name of the
 	// file the player was on when it died, and by then no code here runs.
@@ -4822,6 +4932,13 @@ static void scan_one_file(const char *child, const char *name, const struct stat
 	// and the file is indexed whole. A .cue beside it wins: it was checked
 	// above and has already claimed the audio.
 	if (cue_wav_has_markers(name) && scan_cue_sheet(child, st)) {
+		return;
+	}
+
+	// An SACD ISO indexes as its tracks or not at all: a data ISO is not music,
+	// and neither is an image with nothing playable in it.
+	if (sacd_is_iso(name)) {
+		scan_sacd_iso(child, st);
 		return;
 	}
 
@@ -5492,8 +5609,7 @@ static bool update_compare(const char *path, bool own_files, const namelist_t *f
 				rows = bigger;
 				row_cap = grown;
 			}
-			const char *track = strstr(rest, "?track=");
-			size_t n = track ? (size_t)(track - rest) : strlen(rest);
+			size_t n = virtual_track_len(rest);
 			char *file = malloc(n + 1);
 			if (!file) {
 				rows_complete = false;
@@ -5910,10 +6026,10 @@ static void update_retagged(walk_t *w) {
 				bsearch(&slice[i].rowid, w->gone.ids, (size_t)w->gone.count, sizeof(sqlite3_int64), id_cmp)) {
 				continue;
 			}
-			// A sheet's tracks, and a WAV's marker tracks, are one file.
+			// A sheet's tracks, a WAV's marker tracks and an SACD image's
+			// tracks are one file.
 			char file[600];
-			const char *track = strstr(path, "?track=");
-			snprintf(file, sizeof(file), "%.*s", track ? (int)(track - path) : (int)strlen(path), path);
+			virtual_track_base(path, file, sizeof(file));
 			if (strcmp(file, last_file) == 0) {
 				continue; // that file is decided already, either way
 			}
@@ -5978,12 +6094,10 @@ static void prune_names(void) {
 		 "ALBUM_GROUP_TABLE.album AND m.album_key = ALBUM_GROUP_TABLE.album_key)");
 }
 
-// The file a row stands for: its own path, or for a track of a sheet the
-// sheet's, which is everything before "?track=".
+// The file a row stands for: its own path, or for a track of a sheet or an SACD
+// image the file's, which is everything before "?track=" or "?sacd=".
 static void row_file(const char *path, char *out, size_t size) {
-	const char *mark = strstr(path, "?track=");
-	size_t len = mark ? (size_t)(mark - path) : strlen(path);
-	snprintf(out, size, "%.*s", (int)(len < size ? len : size - 1), path);
+	virtual_track_base(path, out, size);
 }
 
 int library_forget_deleted(const char *const *paths, int count) {
@@ -5996,12 +6110,16 @@ int library_forget_deleted(const char *const *paths, int count) {
 		return 0;
 	}
 
-	// The rows the paths stand for -- a file's own, a sheet's tracks, and
-	// everything under a folder -- and of those, the ones whose file is gone.
+	// The rows the paths stand for -- a file's own, a sheet's or an SACD
+	// image's tracks, and everything under a folder -- and of those, the ones
+	// whose file is gone.
 	// Asked of the card and not assumed: a delete that stopped halfway leaves
 	// some of a folder behind, and those stay.
+	// '?sace' is '?sacd=' with its last byte raised, so it bounds every track
+	// of the image: the prefix, then any next character.
 	static const char *const SELECT_SQL =
 		"SELECT rowid, path FROM MEDIA_TABLE WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')"
+		" OR (path >= ?1 || '?sacd=' AND path < ?1 || '?sace')"
 		" OR (path >= ?1 || '/' AND path < ?1 || '0')";
 	int removed = 0, unfavoured = 0;
 	bool in_transaction = exec("BEGIN");
@@ -6176,14 +6294,18 @@ static int update_take_out(const walk_t *w) {
 	return removed;
 }
 
-// The rows of one file about to be read again: its own, or a sheet's tracks,
-// with their link rows. Returns how many tracks there were.
+// The rows of one file about to be read again: its own, a sheet's tracks or an
+// SACD image's, with their link rows. Returns how many tracks there were.
 static int forget_file(const char *file) {
 	static const char *const SQL[] = {
-		"DELETE FROM MEDIA_TABLE WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')",
-		"DELETE FROM ARTIST_LINK WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')",
-		"DELETE FROM ALBUM_ARTIST_LINK WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')",
-		"DELETE FROM GENRE_LINK WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')",
+		"DELETE FROM MEDIA_TABLE WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')"
+		" OR (path >= ?1 || '?sacd=' AND path < ?1 || '?sace')",
+		"DELETE FROM ARTIST_LINK WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')"
+		" OR (path >= ?1 || '?sacd=' AND path < ?1 || '?sace')",
+		"DELETE FROM ALBUM_ARTIST_LINK WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')"
+		" OR (path >= ?1 || '?sacd=' AND path < ?1 || '?sace')",
+		"DELETE FROM GENRE_LINK WHERE path = ?1 OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')"
+		" OR (path >= ?1 || '?sacd=' AND path < ?1 || '?sace')",
 	};
 	int tracks = 0;
 	pthread_mutex_lock(&db_lock);
@@ -6202,14 +6324,16 @@ static int forget_file(const char *file) {
 	return tracks;
 }
 
-// How many tracks the index holds for one file: its own row, or a sheet's.
+// How many tracks the index holds for one file: its own row, a sheet's or an
+// SACD image's.
 static int file_tracks(const char *file) {
 	int tracks = 0;
 	pthread_mutex_lock(&db_lock);
 	sqlite3_stmt *stmt = NULL;
 	if (db && sqlite3_prepare_v2(db,
 								 "SELECT COUNT(*) FROM MEDIA_TABLE WHERE path = ?1"
-								 " OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')",
+								 " OR (path >= ?1 || '?track=' AND path < ?1 || '?track>')"
+								 " OR (path >= ?1 || '?sacd=' AND path < ?1 || '?sace')",
 								 -1, &stmt, NULL) == SQLITE_OK) {
 		sqlite3_bind_text(stmt, 1, file, -1, SQLITE_TRANSIENT);
 		if (sqlite3_step(stmt) == SQLITE_ROW) {
