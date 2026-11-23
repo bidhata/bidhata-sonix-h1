@@ -21,6 +21,7 @@
 #include "src/system/core/lang.h"
 #include "src/system/net/tls.h"
 #include "src/system/streaming/onair.h"
+#include "src/system/streaming/radio_volume.h"
 #include "src/system/streaming/radioflac.h"
 #include "src/system/playback/playhistory.h"
 #include "src/system/core/utils.h"
@@ -2159,9 +2160,11 @@ static bool radio_push_pcm(radio_out_t *out, short *pcm, short *stereo, int fram
 			stereo[2 * i + 1] = pcm[i];
 		}
 		eq_process(stereo, frames, 2, rate);
+		radio_volume_apply(stereo, frames, 16);
 		audio_external_write(stereo, frames);
 	} else if (channels == 2) {
 		eq_process(pcm, frames, 2, rate);
+		radio_volume_apply(pcm, frames, 16);
 		audio_external_write(pcm, frames);
 	} else {
 		// More than two channels, which on a radio station is AAC carrying 5.1.
@@ -2180,6 +2183,7 @@ static bool radio_push_pcm(radio_out_t *out, short *pcm, short *stereo, int fram
 			stereo[2 * i + 1] = (short)(right / pairs);
 		}
 		eq_process(stereo, frames, 2, rate);
+		radio_volume_apply(stereo, frames, 16);
 		audio_external_write(stereo, frames);
 	}
 	return true;
@@ -2238,6 +2242,7 @@ static bool radio_push_pcm32(radio_out_t *out, int32_t *pcm, int32_t *stereo, in
 		frames_out = stereo;
 	}
 	eq_process_s32(frames_out, frames, 2, rate);
+	radio_volume_apply(frames_out, frames, 32);
 	audio_external_write(frames_out, frames);
 	return true;
 }
