@@ -135,6 +135,22 @@ static void popup_disconnected_cb(void *unused) {
 	browser_refresh(); // the PC may have changed the card content
 }
 
+static void wake_screen_cb(void *unused) {
+	(void)unused;
+	power_notify_activity();
+	power_screen_on();
+}
+
+// A host on the cable must be able to use the storage: if the screen is dark,
+// wake the device so it comes up the way the stock firmware does. Posted to the
+// UI thread; cheap no-op when the screen is already on.
+static void wake_for_usb_host(void) {
+	if (!power_screen_is_on()) {
+		fprintf(stderr, "usb: host attached while the screen is off; waking\n");
+		gui_post(wake_screen_cb, NULL);
+	}
+}
+
 static bool vbus_present(void) {
 	for (size_t i = 0; i < sizeof(VBUS_CANDIDATES) / sizeof(VBUS_CANDIDATES[0]); i++) {
 		char *content = read_file_content(VBUS_CANDIDATES[i]);
@@ -1108,6 +1124,7 @@ static void *usb_thread(void *arg) {
 			continue;
 		}
 
+		wake_for_usb_host();
 		locked_export();
 		exported = storage_active;
 		// Not handed over because the card could not be unmounted: not tried

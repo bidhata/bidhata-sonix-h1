@@ -39,6 +39,21 @@ static const struct {
 };
 #define STANDBY_AFTER_COUNT ((int)(sizeof(STANDBY_AFTER) / sizeof(STANDBY_AFTER[0])))
 
+// How often the R1 wakes from standby to look for a USB cable, so storage can
+// appear while the screen is dark. Saved in seconds under
+// [power] usb_wake_check_seconds; 0 turns the check off.
+static const struct {
+	int seconds;
+	const char *label;
+} USB_WAKE_AFTER[] = {
+	{0, "power_usb_wake_off"}, {15, "power_usb_wake_15s"}, {30, "power_usb_wake_30s"}, {60, "power_usb_wake_60s"},
+};
+#define USB_WAKE_AFTER_COUNT ((int)(sizeof(USB_WAKE_AFTER) / sizeof(USB_WAKE_AFTER[0])))
+
+// The R1's default interval, and the one a switch-on lands on when the slider
+// was left on "Off".
+#define USB_WAKE_DEFAULT_INDEX 2
+
 // The standby card while standby is off: as low as a toggle with pills under
 // it when they are folded away ("Split artists" in the music settings), the
 // switch and the card's padding and nothing else.
@@ -49,6 +64,7 @@ static lv_obj_t *auto_off_switch, *auto_off_value, *auto_off_slider, *auto_off_c
 static lv_obj_t *led_on_switch, *led_off_switch, *led_off_card;
 static lv_obj_t *key_lock_switch;
 static lv_obj_t *standby_switch, *standby_value, *standby_slider, *standby_card;
+static lv_obj_t *usb_wake_switch, *usb_wake_value, *usb_wake_slider, *usb_wake_card;
 static lv_obj_t *charge_note;
 static lv_obj_t *axp_limit_switch, *axp_current_switch; // the R1's two, instead of the slider
 
@@ -88,6 +104,20 @@ static int standby_after_index(void) {
 	return STANDBY_AFTER_COUNT - 1;
 }
 
+// The first offered interval that is at least the saved one, or the longest
+// when the saved value is past the table. On a player without the PMIC charger
+// the key is absent and the answer is off, which keeps its path unchanged.
+static int usb_wake_after_index(void) {
+	long fallback = axpcharge_applies() ? USB_WAKE_AFTER[USB_WAKE_DEFAULT_INDEX].seconds : 0;
+	int seconds = (int)config_get_int("power", "usb_wake_check_seconds", fallback);
+	for (int i = 0; i < USB_WAKE_AFTER_COUNT; i++) {
+		if (seconds <= USB_WAKE_AFTER[i].seconds) {
+			return i;
+		}
+	}
+	return USB_WAKE_AFTER_COUNT - 1;
+}
+
 // --- applying them ---
 
 static void set_checked(lv_obj_t *sw, bool on) {
@@ -120,6 +150,10 @@ void powersettings_apply(void) {
 	// player shortly after the screen goes off.
 	power_set_standby_enabled(config_get_bool("power", "standby_mem", true));
 	power_set_standby_after((uint32_t)STANDBY_AFTER[standby_after_index()].seconds);
+
+	// The cable check is a standby-only wake, so it follows the same saved
+	// interval as the slider; 0 leaves it off.
+	power_set_usb_wake_check((uint32_t)USB_WAKE_AFTER[usb_wake_after_index()].seconds);
 
 	// The LED master switch comes first: with it off there is nothing for the
 	// standby option to turn off, and led.c keeps the charge indicator alive
@@ -178,6 +212,18 @@ static void refresh_labels(void) {
 	if (!standby) {
 		lv_obj_set_height(standby_card, STANDBY_CLOSED_H);
 	}
+
+	// The cable check, like standby, keeps its interval on a slider that is
+	// only meaningful while the switch is on. A saved 0 is off.
+	int usb_wake_index = usb_wake_after_index();
+	bool usb_wake = USB_WAKE_AFTER[usb_wake_index].seconds > 0;
+	if (usb_wake) {
+		lv_obj_add_state(usb_wake_switch, LV_STATE_CHECKED);
+	} else {
+		lv_obj_remove_state(usb_wake_switch, LV_STATE_CHECKED);
+	}
+	lv_label_set_text(usb_wake_value, tr(USB_WAKE_AFTER[usb_wake_index].label));
+	settingsrow_toggle_slider_expanded(usb_wake_card, usb_wake);
 
 	// One card: the slider is only on it while the toggle is on.
 	bool auto_off = config_get_bool("power", "auto_off", false);
@@ -275,6 +321,34 @@ static void standby_toggled_cb(lv_event_t *e) {
 	refresh_labels();
 }
 
+static void usb_wake_changed_cb(lv_event_t *e) {
+	(void)e;
+	int index = (int)lv_slider_get_value(usb_wake_slider);
+	config_set_int("power", "usb_wake_check_seconds", USB_WAKE_AFTER[index].seconds);
+	config_save();
+	powersettings_apply();
+	refresh_labels();
+}
+
+static void usb_wake_toggled_cb(lv_event_t *e) {
+	(void)e;
+	int index = (int)lv_slider_get_value(usb_wake_slider);
+	int seconds = 0;
+	if (lv_obj_has_state(usb_wake_switch, LV_STATE_CHECKED)) {
+		// Switching on from "Off" would write 0 and leave the card looking
+		// broken, so land on the usual interval and move the slider with it.
+		if (USB_WAKE_AFTER[index].seconds == 0) {
+			index = USB_WAKE_DEFAULT_INDEX;
+			lv_slider_set_value(usb_wake_slider, index, LV_ANIM_OFF);
+		}
+		seconds = USB_WAKE_AFTER[index].seconds;
+	}
+	config_set_int("power", "usb_wake_check_seconds", seconds);
+	config_save();
+	powersettings_apply();
+	refresh_labels();
+}
+
 void powersettings_init(gui_config_t *cfg) {
 	lv_obj_t *container = settingsrow_page(powersettings_screen, cfg, "power");
 
@@ -293,6 +367,20 @@ void powersettings_init(gui_config_t *cfg) {
 	lv_obj_add_style(standby_note, &theme_style_text_dim, 0);
 	lv_obj_set_style_text_font(standby_note, &font_ui_22, 0);
 	lv_label_set_text(standby_note, tr("power_standby_mem_note"));
+
+	// While it sleeps, the R1 wakes briefly every so often to see whether a
+	// cable arrived, so storage can show up without pressing power. The shorter
+	// the wait the more often it wakes, and the more battery that costs.
+	usb_wake_card = settingsrow_toggle_slider(container, "power_usb_wake", USB_WAKE_AFTER_COUNT, &usb_wake_switch,
+											 &usb_wake_value, &usb_wake_slider, usb_wake_toggled_cb,
+											 usb_wake_changed_cb);
+	lv_slider_set_value(usb_wake_slider, usb_wake_after_index(), LV_ANIM_OFF);
+	lv_obj_t *usb_wake_note = lv_label_create(container);
+	lv_label_set_long_mode(usb_wake_note, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(usb_wake_note, lv_pct(100));
+	lv_obj_add_style(usb_wake_note, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(usb_wake_note, &font_ui_22, 0);
+	lv_label_set_text(usb_wake_note, tr("power_usb_wake_note"));
 
 	// The R1 charges through its PMIC, which takes a lower target voltage and a
 	// lower current rather than a percentage: two switches there, the slider

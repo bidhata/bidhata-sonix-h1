@@ -254,6 +254,13 @@ void power_set_standby_enabled(bool enabled);
 // [power] standby_mem_seconds). Never less than 15.
 void power_set_standby_after(uint32_t seconds);
 
+// How often to wake from standby to check for a freshly plugged cable, in
+// seconds ([power] usb_wake_check_seconds). Only 0 (off), 15, 30 and 60 are
+// accepted; anything else is clamped to 0. The check shares the single RTC
+// alarm with the automatic shutdown and the battery check, and only runs while
+// no cable is present.
+void power_set_usb_wake_check(uint32_t seconds);
+
 // Powers the Bluetooth radio and its daemons down, in order, through
 // bluetooth_power_down_stack(). The stock init script starts the whole stack at
 // every boot -- rfkill on, patchram, bluetoothd, bluealsa -- and with the

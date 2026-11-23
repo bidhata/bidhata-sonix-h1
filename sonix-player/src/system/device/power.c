@@ -41,6 +41,7 @@
 #include "src/system/core/config.h"
 #include "src/system/core/logging.h"
 #include "src/system/device/usb.h"
+#include "src/system/device/usbwake.h"
 #include "src/system/audio/usbdac.h"
 #include "src/system/gearboy/gearboy.h"
 #include "src/system/video/video.h"
@@ -891,6 +892,10 @@ static bool g_mem_enabled;
 // standby is never left silently disabled for the rest of the session.
 static bool g_mem_blocked_this_dark;
 static uint32_t g_mem_after_ms;
+// How often to wake from standby to look for a cable, in seconds ([power]
+// usb_wake_check_seconds). 0 disables the check. Set at init and from Settings;
+// only the values the slider offers are accepted (see usbwake_interval_valid).
+static uint32_t g_usb_check_s;
 static int g_mem_instant_wakes;		// consecutive 0-1 s wakes: something wakes it at once
 static int g_mem_instant_wakes_max; // past this many, standby blocks itself
 static uint32_t g_mem_last_attempt_ms; // to avoid hammering while a condition blocks
@@ -911,6 +916,10 @@ void power_set_standby_after(uint32_t seconds) {
 		seconds = STANDBY_MEM_MIN_SECONDS; // any lower risks the device sleeping under the fingers
 	}
 	g_mem_after_ms = seconds * 1000u;
+}
+
+void power_set_usb_wake_check(uint32_t seconds) {
+	g_usb_check_s = usbwake_interval_valid(seconds) ? seconds : 0;
 }
 
 // What the kernel says about the last suspend: counters and, above all, the
@@ -981,15 +990,17 @@ static void mem_skip(const char *why) {
 
 static bool g_rtc_alarm_armed;
 // Whether the automatic shutdown has a deadline in this sleep, and whether the
-// alarm programmed is the battery's.
+// alarm programmed is the battery's or the cable check's. The three are not
+// exclusive: the shutdown keeps its own deadline while a battery or cable check
+// occupies the alarm, so it can still fire on a later suspend.
 static bool g_rtc_auto_off_armed;
 static bool g_rtc_battery_armed;
-// The automatic shutdown's deadline on CLOCK_BOOTTIME. The wall clock is not
-// usable for this: it does not count the sleep, and clock_resync() -- the one
-// thing that would fix it -- refuses to do anything until the date has been set
-// by hand or by ntpdate, so on a device that has seen neither the deadline check
-// never comes true. CLOCK_BOOTTIME counts suspended time and needs nobody's
-// permission.
+static bool g_rtc_usb_check_armed;
+// The deadlines on CLOCK_BOOTTIME. The wall clock is not usable for this: it
+// does not count the sleep, and clock_resync() -- the one thing that would fix
+// it -- refuses to do anything until the date has been set by hand or by
+// ntpdate, so on a device that has seen neither the deadline check never comes
+// true. CLOCK_BOOTTIME counts suspended time and needs nobody's permission.
 static uint32_t g_rtc_alarm_boot_at;
 static uint32_t g_rtc_battery_boot_at;
 
@@ -1014,6 +1025,7 @@ static void rtc_alarm_disarm(void) {
 	g_rtc_alarm_armed = false;
 	g_rtc_auto_off_armed = false;
 	g_rtc_battery_armed = false;
+	g_rtc_usb_check_armed = false;
 	rtc_wakealarm_write("0");
 	printf("power: RTC wake alarm disarmed\n");
 }
@@ -1033,6 +1045,7 @@ static void rtc_alarm_arm(void) {
 	g_rtc_alarm_armed = false;
 	g_rtc_auto_off_armed = false;
 	g_rtc_battery_armed = false;
+	g_rtc_usb_check_armed = false;
 
 	long auto_off_s = 0;
 	if (g_auto_off_enabled && g_auto_off_ms > 0) {
@@ -1043,6 +1056,14 @@ static void rtc_alarm_arm(void) {
 		}
 	}
 	long battery_s = battery_check_after_s();
+	// A cable check is only useful while standby is actually in use (that is
+	// when the device is asleep and would miss an insertion) and no cable is
+	// plugged: with VBUS up the charge tick and the charging screen already
+	// watch it, and the MP2731 on non-R1 models wakes on insert by itself.
+	long usb_s = (g_mem_enabled && !usb_vbus_present()) ? (long)g_usb_check_s : 0;
+
+	long remaining_s = 0;
+	usbwake_reason_t reason = usbwake_pick(auto_off_s, battery_s, usb_s, &remaining_s);
 
 	// Cleared on every path, not only when a new one is written: an alarm left
 	// over from an earlier suspend outlives the setting that armed it, and fires
@@ -1050,26 +1071,33 @@ static void rtc_alarm_arm(void) {
 	// flag down, so nothing acts on it and it simply burns battery in the dark.
 	// Cleared first also because the kernel rejects a new alarm over a pending
 	// one.
-	if (!rtc_wakealarm_write("0") || (auto_off_s == 0 && battery_s == 0)) {
+	if (!rtc_wakealarm_write("0") || remaining_s == 0) {
 		return;
 	}
-	bool battery_first = battery_s > 0 && (auto_off_s == 0 || battery_s < auto_off_s);
-	long remaining_s = battery_first ? battery_s : auto_off_s;
 	// Relative to the RTC's own time ("+N"): the system clock is not kept in
 	// step with the RTC (see clock.c), and an absolute time taken from it can
-	// land years away from where the RTC stands.
+	// land years away from where the RTC stands. usbwake_pick() above has
+	// already chosen which deadline this is.
 	char buf[32];
 	snprintf(buf, sizeof(buf), "+%ld", remaining_s);
 	if (!rtc_wakealarm_write(buf)) {
 		return;
 	}
 	g_rtc_alarm_armed = true;
+	// The shutdown keeps its own deadline even when the alarm goes to a battery
+	// or cable check, so it still fires on a later suspend. The other two flags
+	// say which check owns this alarm; usbwake_pick already breaks ties in
+	// favour of auto-off, then battery, then USB.
 	g_rtc_auto_off_armed = auto_off_s > 0;
-	g_rtc_battery_armed = battery_first;
-	g_rtc_alarm_boot_at = boottime_ms() + (uint32_t)auto_off_s * 1000u;
-	g_rtc_battery_boot_at = boottime_ms() + (uint32_t)battery_s * 1000u;
+	g_rtc_battery_armed = battery_s > 0 && reason == USBWAKE_BATTERY;
+	g_rtc_usb_check_armed = usb_s > 0 && reason == USBWAKE_USB_CHECK;
+	uint32_t now = boottime_ms();
+	g_rtc_alarm_boot_at = now + (uint32_t)auto_off_s * 1000u;
+	g_rtc_battery_boot_at = now + (uint32_t)battery_s * 1000u;
 	printf("power: mem: RTC wake in %ld s %s\n", remaining_s,
-		   battery_first ? "to look at the battery" : "for the automatic shutdown");
+		   reason == USBWAKE_USB_CHECK ? "to check for a cable"
+		   : reason == USBWAKE_BATTERY ? "to look at the battery"
+		   : "for the automatic shutdown");
 }
 
 void power_shutdown(void) {
@@ -1280,28 +1308,48 @@ static void suspend_to_ram(void) {
 
 	// If the RTC alarm is what woke the device there is no user: the automatic
 	// shutdown deadline arrived, so it shuts down here, before the idle markers
-	// restart. A user wake before the deadline leaves the alarm armed, and
-	// turning the screen on disarms it a moment later.
+	// restart. The alarm is a one-shot and is consumed on every wake path.
 	//
 	// The deadline is read off CLOCK_BOOTTIME rather than the wall clock (see
-	// g_rtc_alarm_boot_at), and a queued power press counts as a user: the
-	// disarm below only runs on the next tick, so without that test a press
-	// within a couple of seconds of the deadline would switch the device off in
-	// the user's hand.
+	// g_rtc_alarm_boot_at), and a queued power press counts as a user: without
+	// that test a press within a couple of seconds of the deadline would switch
+	// the device off in the user's hand.
 	pthread_mutex_lock(&g_lock);
 	bool user_woke_it = g_power_button_pending;
 	pthread_mutex_unlock(&g_lock);
 
 	bool rtc_woke_it = rc == 0 && g_rtc_alarm_armed && !user_woke_it;
-	if (rtc_woke_it && g_rtc_auto_off_armed && (int32_t)(boottime_ms() - g_rtc_alarm_boot_at) >= 0) {
+	// Copy what this wake was for before disarming clears it, then decide from
+	// the copies: the resume path acts on these copied armed flags, which are
+	// the source of truth for what this alarm was for.
+	bool usb_check_wake = g_rtc_usb_check_armed;
+	bool auto_off_armed = g_rtc_auto_off_armed;
+	bool battery_armed = g_rtc_battery_armed;
+	rtc_alarm_disarm();
+	if (rtc_woke_it && auto_off_armed && (int32_t)(boottime_ms() - g_rtc_alarm_boot_at) >= 0) {
 		power_auto_off_now("RTC wake after mem: the idle time has run out");
 	}
 	// The battery's own wake: a few seconds of slack, as the RTC counts whole
-	// seconds and the wake takes a moment.
+	// seconds and the wake takes a moment. A cable check owning the alarm rules
+	// out a battery look at the same time.
 	bool battery_wake =
-		rtc_woke_it && g_rtc_battery_armed && (int32_t)(boottime_ms() - g_rtc_battery_boot_at) >= -5000;
+		rtc_woke_it && battery_armed && !usb_check_wake && (int32_t)(boottime_ms() - g_rtc_battery_boot_at) >= -5000;
 	if (battery_wake) {
 		printf("power: mem: RTC wake to look at the battery\n");
+	}
+
+	// A cable check that found a cable is a user-visible insert: bring the
+	// screen back so the charging screen can appear. One that found nothing
+	// leaves the screen dark and goes back to sleep after a short awake window.
+	bool cable_found = false;
+	if (usb_check_wake) {
+		if (usb_vbus_present()) {
+			printf("power: mem: RTC check for a cable -- cable found\n");
+			cable_found = true;
+			power_screen_on();
+		} else {
+			printf("power: mem: RTC check for a cable -- none found\n");
+		}
 	}
 
 	// No recovery of the old stream: there is nothing left to recover -- the
@@ -1314,7 +1362,8 @@ static void suspend_to_ram(void) {
 	// would push the shutdown out by a whole period on every suspend. That
 	// shutdown counts on CLOCK_BOOTTIME, which counted the sleep; a real user
 	// wake stamps the marker through power_screen_on().
-	g_mem_active_ms = lv_tick_get();
+	g_mem_active_ms =
+		usbwake_mem_active_after_wake(lv_tick_get(), g_mem_after_ms, usb_check_wake, cable_found);
 	g_screen_off_at = lv_tick_get();
 	g_mem_last_attempt_ms = lv_tick_get();
 	g_mem_skip_logged[0] = '\0';
@@ -2044,6 +2093,15 @@ void power_init(const power_config_t *cfg, lv_display_t *disp) {
 		g_mem_instant_wakes_max = 1;
 	}
 	power_set_standby_after(mem_secs > 0 ? (uint32_t)mem_secs : 0);
+
+	// Periodic cable check during standby. Only the player whose PMIC is its
+	// charger needs it (the MP2731 on the others wakes on insert by itself), so
+	// that is the default; [power] usb_wake_check_seconds overrides it, and the
+	// setter drops anything the settings slider would not offer.
+	const sysinfo_model_t *model = sysinfo_model();
+	long usb_check_s = config_get_int("power", "usb_wake_check_seconds",
+		(long)usbwake_default_seconds(model && model->pmic_charger));
+	power_set_usb_wake_check(usb_check_s > 0 ? (uint32_t)usb_check_s : 0);
 
 	// The radios go down on their own clock, not the Standby toggle's: they are
 	// worth switching off whether or not the SoC is going to sleep.
