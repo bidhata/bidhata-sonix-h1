@@ -61,11 +61,15 @@ static lv_obj_t *brightness_value;
 static lv_obj_t *screen_off_value;
 static lv_obj_t *screen_off_slider;
 static lv_obj_t *doubletap_switch;
+static lv_obj_t *rotate_switch;
+
+static lv_obj_t *screensaver_card;
 static lv_obj_t *screensaver_switch;
 static lv_obj_t *screensaver_pills;
 static lv_obj_t *screensaver_album_pill;
 static lv_obj_t *screensaver_images_pill;
-static lv_obj_t *rotate_switch;
+static lv_obj_t *screensaver_show_date_row;
+static lv_obj_t *screensaver_show_date_switch;
 
 static void doubletap_toggle_cb(lv_event_t *e) {
 	(void)e;
@@ -76,8 +80,8 @@ static void doubletap_toggle_cb(lv_event_t *e) {
 }
 
 // The two pills under the switch, and which of them is lit. Hidden with the
-// screensaver off: "album or pictures" means nothing when there is no
-// screensaver to show either.
+// screensaver off: "album or pictures" and "show date" mean nothing when there
+// is no screensaver to show either.
 static void screensaver_refresh(void) {
 	if (!screensaver_switch) {
 		return;
@@ -86,13 +90,26 @@ static void screensaver_refresh(void) {
 	if (on) {
 		lv_obj_add_state(screensaver_switch, LV_STATE_CHECKED);
 		lv_obj_set_hidden(screensaver_pills, false);
+		if (screensaver_show_date_row) {
+			lv_obj_set_hidden(screensaver_show_date_row, false);
+		}
 	} else {
 		lv_obj_remove_state(screensaver_switch, LV_STATE_CHECKED);
 		lv_obj_set_hidden(screensaver_pills, true);
+		if (screensaver_show_date_row) {
+			lv_obj_set_hidden(screensaver_show_date_row, true);
+		}
 	}
 	screensaver_source_t source = screensaver_source();
 	settingsrow_pill_active(screensaver_album_pill, source == SCREENSAVER_SOURCE_ALBUM);
 	settingsrow_pill_active(screensaver_images_pill, source == SCREENSAVER_SOURCE_IMAGES);
+	if (screensaver_show_date_switch) {
+		if (screensaver_get_show_date()) {
+			lv_obj_add_state(screensaver_show_date_switch, LV_STATE_CHECKED);
+		} else {
+			lv_obj_remove_state(screensaver_show_date_switch, LV_STATE_CHECKED);
+		}
+	}
 }
 
 static void screensaver_toggle_cb(lv_event_t *e) {
@@ -121,6 +138,11 @@ static void screensaver_source_cb(lv_event_t *e) {
 
 	screensaver_set_source(chosen);
 	screensaver_refresh();
+}
+
+static void screensaver_show_date_cb(lv_event_t *e) {
+	(void)e;
+	screensaver_set_show_date(lv_obj_has_state(screensaver_show_date_switch, LV_STATE_CHECKED));
 }
 
 // Rotate screen: the picture turns 180 degrees and the touch panel with it.
@@ -310,29 +332,51 @@ static void build_screen_page(gui_config_t *cfg) {
 		}
 	}
 
-	// The screensaver: a picture, the track and the time over everything else
-	// the moment the panel lights back up. A swipe up puts it away. The pills
-	// say where the picture comes from -- the record being played, or the
-	// card's own Screensaver folder.
-	settingsrow_toggle_pills(container, "screensaver", screensaver_toggle_cb, &screensaver_switch,
-							 &screensaver_pills);
-	screensaver_album_pill =
-		settingsrow_pill(screensaver_pills, "screensaver_source_album", SCREENSAVER_SOURCE_ALBUM, screensaver_source_cb);
-	screensaver_images_pill =
-		settingsrow_pill(screensaver_pills, "screensaver_source_images", SCREENSAVER_SOURCE_IMAGES, screensaver_source_cb);
-	screensaver_refresh();
-
 	// Upside down, for holding the player the other way up.
 	settingsrow_toggle(container, "settings_rotate_screen", &rotate_switch, rotate_toggle_cb);
 	if (config_get_int("screen", "rotate_180", 0)) {
 		lv_obj_add_state(rotate_switch, LV_STATE_CHECKED);
 	}
 
+	// Screensaver settings grouped in one card after Rotate screen: source and
+	// "Show date" appear inside the same box and only when enabled.
+	screensaver_card = settingsrow_toggle_pills(container, "screensaver", screensaver_toggle_cb, &screensaver_switch,
+												&screensaver_pills);
+	screensaver_album_pill =
+		settingsrow_pill(screensaver_pills, "screensaver_source_album", SCREENSAVER_SOURCE_ALBUM, screensaver_source_cb);
+	screensaver_images_pill =
+		settingsrow_pill(screensaver_pills, "screensaver_source_images", SCREENSAVER_SOURCE_IMAGES, screensaver_source_cb);
+
+	screensaver_show_date_row = lv_obj_create(screensaver_card);
+	lv_obj_set_size(screensaver_show_date_row, lv_pct(100), LV_SIZE_CONTENT);
+	lv_obj_set_style_bg_opa(screensaver_show_date_row, 0, 0);
+	lv_obj_set_style_border_width(screensaver_show_date_row, 0, 0);
+	lv_obj_set_style_shadow_width(screensaver_show_date_row, 0, 0);
+	lv_obj_set_style_pad_all(screensaver_show_date_row, 0, 0);
+	lv_obj_set_scrollable(screensaver_show_date_row, false);
+	lv_obj_set_event_bubble(screensaver_show_date_row, true);
+	lv_obj_set_flex_flow(screensaver_show_date_row, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(screensaver_show_date_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_pad_gap(screensaver_show_date_row, 12, 0);
+
+	lv_obj_t *date_name = lv_label_create(screensaver_show_date_row);
+	lv_label_set_text(date_name, tr("screensaver_show_date"));
+	lv_obj_add_style(date_name, &theme_style_text, 0);
+	lv_obj_set_style_text_font(date_name, &font_ui_24, 0);
+	lv_label_set_long_mode(date_name, LV_LABEL_LONG_WRAP);
+	lv_obj_set_flex_grow(date_name, 1);
+
+	screensaver_show_date_switch = settingsrow_switch(screensaver_show_date_row, screensaver_show_date_cb);
+	if (screensaver_get_show_date()) {
+		lv_obj_add_state(screensaver_show_date_switch, LV_STATE_CHECKED);
+	}
+
+	screensaver_refresh();
+	theme_register_refresh(screensaver_refresh);
+
 	lv_obj_add_event_cb(screensettings_screen, screensettings_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 	switcher_attach_back_gesture(screensettings_screen);
 	theme_register_refresh(refresh_brightness_slider);
-	// The pills carry hand-set colours, so a theme change has to repaint them.
-	theme_register_refresh(screensaver_refresh);
 }
 
 // The developer options row is kept in a global because it appears and

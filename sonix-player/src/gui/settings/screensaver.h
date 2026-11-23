@@ -20,6 +20,10 @@ void screensaver_init(gui_config_t *cfg);
 void screensaver_set_enabled(bool enabled);
 bool screensaver_get_enabled(void);
 
+// Config-backed date display ("screen"/"screensaver_show_date"). On by default.
+void screensaver_set_show_date(bool on);
+bool screensaver_get_show_date(void);
+
 // Where the picture comes from.
 //
 // Album is the artwork of what is playing, borrowed from the player and free.

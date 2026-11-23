@@ -16,6 +16,7 @@
 #include "src/gui/shell/theme.h"
 #include "src/system/device/clock.h"
 #include "src/system/core/config.h"
+#include "src/system/core/lang.h"
 #include "src/system/playback/device_state.h"
 #include "src/system/device/power.h"
 #include "src/system/device/screensaverpics.h"
@@ -34,17 +35,19 @@ static lv_obj_t *info_strip; // the blurred block along the bottom
 static lv_obj_t *cover_box;	 // the artwork's frame, everything above the strip
 static lv_obj_t *title_label;
 static lv_obj_t *artist_label;
+static lv_obj_t *date_label;
 static lv_obj_t *clock_label;
 static lv_timer_t *clock_timer;
 
 static bool enabled;
+static bool show_date;
 static int screen_w, screen_h;
 static int strip_h;
 
 // What the strip falls back to when there is no artwork to size it from, and
 // the height it always has over a picture from the folder -- there the block
 // is built to order rather than borrowed, so there is nothing to measure.
-#define DEFAULT_STRIP_H 250
+#define DEFAULT_STRIP_H 290
 
 // ---------------------------------------------------------------------------
 // Pictures from the card
@@ -108,6 +111,7 @@ static void set_strip_height(int height) {
 
 bool screensaver_is_visible(void) { return saver && !lv_obj_is_hidden(saver); }
 bool screensaver_get_enabled(void) { return enabled; }
+bool screensaver_get_show_date(void) { return show_date; }
 
 screensaver_source_t screensaver_source(void) { return source; }
 
@@ -208,11 +212,50 @@ void screensaver_set_enabled(bool on) {
 	}
 }
 
+static void refresh_date(void);
+
+void screensaver_set_show_date(bool on) {
+	show_date = on;
+	config_set_bool("screen", "screensaver_show_date", on);
+	config_save();
+	refresh_date();
+}
+
 // ---------------------------------------------------------------------------
 // what it shows
 // ---------------------------------------------------------------------------
 
-static void refresh_clock(void) { clocklabel_refresh(clock_label); }
+static void refresh_date(void) {
+	if (!date_label) {
+		return;
+	}
+	if (!show_date || !clock_is_set()) {
+		lv_label_set_text(date_label, "");
+		lv_obj_set_hidden(date_label, true);
+		return;
+	}
+
+	static const char *const MONTHS[12] = {"podcast_january", "podcast_february", "podcast_march",
+										   "podcast_april", "podcast_may", "podcast_june",
+										   "podcast_july", "podcast_august", "podcast_september",
+										   "podcast_october", "podcast_november", "podcast_december"};
+	time_t now = time(NULL);
+	struct tm tm_now;
+	if (!localtime_r(&now, &tm_now)) {
+		lv_label_set_text(date_label, "");
+		lv_obj_set_hidden(date_label, true);
+		return;
+	}
+	char buf[64];
+	snprintf(buf, sizeof(buf), "%d %s %d", tm_now.tm_mday, tr(MONTHS[tm_now.tm_mon % 12]), tm_now.tm_year + 1900);
+	lv_label_set_text(date_label, buf);
+	lv_obj_set_hidden(date_label, false);
+}
+
+static void refresh_clock(void) {
+	clocklabel_refresh(clock_label);
+	refresh_date();
+}
 
 // What refresh_content() last drew, so the tick below can tell an idle moment
 // from a track that changed while the screensaver was up.
@@ -583,6 +626,7 @@ void screensaver_init(gui_config_t *cfg) {
 
 	screensaver_set_card_root(cfg->sd_root_path);
 	enabled = config_get_bool("screen", "screensaver", false);
+	show_date = config_get_bool("screen", "screensaver_show_date", true);
 	source = config_get_int("screen", "screensaver_source", SCREENSAVER_SOURCE_ALBUM) == SCREENSAVER_SOURCE_IMAGES
 				 ? SCREENSAVER_SOURCE_IMAGES
 				 : SCREENSAVER_SOURCE_ALBUM;
@@ -664,10 +708,20 @@ void screensaver_init(gui_config_t *cfg) {
 	lv_obj_set_style_text_align(artist_label, LV_TEXT_ALIGN_CENTER, 0);
 	scrolltext_apply(artist_label);
 
+	date_label = lv_label_create(info_strip);
+	lv_obj_set_width(date_label, lv_pct(100));
+	lv_obj_set_style_text_font(date_label, &font_ui_22, 0);
+	lv_obj_set_style_text_color(date_label, lv_color_white(), 0);
+	lv_obj_set_style_text_align(date_label, LV_TEXT_ALIGN_CENTER, 0);
+	lv_label_set_text(date_label, "");
+	lv_obj_set_hidden(date_label, true);
+
 	// The time, in the largest figures the screen has.
 	clock_label = clocklabel_create(info_strip, &font_ui_72, 72, &font_ui_32, 32);
 	lv_obj_set_style_text_color(clock_label, lv_color_white(), 0);
-	lv_obj_set_style_pad_top(clock_label, 6, 0);
+	lv_obj_set_style_pad_top(clock_label, 2, 0);
+
+	refresh_date();
 
 	// The way out, spelled out: swipe up. A sign, not a button -- tapping it
 	// does nothing, since the screensaver is only dismissed by dragging -- so it
