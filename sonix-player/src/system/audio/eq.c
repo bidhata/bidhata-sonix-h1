@@ -1355,11 +1355,15 @@ static float pregain = 1.0f;
 static float pregain_target = 1.0f;
 
 // MSEB's, which is a different thing computed a different way -- see the note
-// over mseb_auto_preamp_db(). Kept in dB as well because the settings page
+// over mseb_level_measure(). Kept in dB as well because the settings page
 // reports it and because it can be positive.
 static float mseb_pregain = 1.0f;
 static float mseb_pregain_target = 1.0f;
 static float mseb_pregain_db;
+// Whether anything in the chain can raise the level, which is what decides
+// whether the output needs the soft clip. False for a flat chain or one that
+// cannot exceed unity, so those stay bit-transparent above the knee.
+static bool clip_guard;
 static unsigned built_version;
 static int built_rate;
 
@@ -1574,10 +1578,36 @@ void eq_response_curve(const int *freqs, int count, int sample_rate, int *out_te
 // it. The answer can be negative, zero OR POSITIVE: a setting that cuts more
 // than it boosts gets some level handed back.
 //
-// So it is a level normalisation and not a clip guard, and the two disagree
-// almost everywhere. Four overlapping filters at +3 dB make a curve that peaks
-// well above +3; a filter that boosts and one that cuts partly cancel; a curve
-// that only cuts leaves the stock louder than a player that can only attenuate.
+// That search is kept exactly as the stock runs it -- the numbers below are
+// read out of it rather than chosen -- because it is also the level the module
+// was tuned around. On its own, though, it is a level normalisation and not a
+// clip guard: only about a fifth of the probe mass sits under the 70 Hz corner,
+// so a low-shelf boost is cancelled only about a sixth of the way and the rest
+// reaches the output. At Extended Bass 60 that was +12.4 dB net, and the final
+// clamp turned it into the hard distortion of issue #180.
+//
+// So the stock value is the base, and mseb_effective_db() below corrects it
+// twice:
+//
+//   - the positive net gain is scaled by 0.73, which approximates the level the
+//     stock firmware is measured to play at (its own net is about 3.5 dB lower
+//     at the same slider; the thresholds in issue #180 are what calibrated it);
+//   - the net is held at or below +10.3 dB, the stock onset level, so the top
+//     of the range stays at 70-ish instead of getting worse all the way up.
+//
+// A curve with no positive-gain filter keeps the stock value verbatim: that is
+// the cutting-only case, where the positive make-up gain is the stock
+// behaviour and not a boost. The gate is the declared gain of the filters that
+// were actually built, not the sign of the combined peak: a lone +5 dB Air
+// shelf surrounded by deeper cuts has a negative combined peak and must still
+// be guarded, while a nominally cutting shelf can measure a few hundredths of a
+// dB of ripple from its own Q and must not be mistaken for a boost. Anything
+// still above unity after this is the soft clip's problem at the output.
+//
+// The peak is the maximum of the same 128-point cascade response the search
+// already computes, plus the analytic DC and Nyquist asymptotes (see
+// mseb_level_measure()): the grid starts at 20 Hz and stops at 18.8 kHz, while
+// a 70 Hz low shelf holds its gain at DC and a 10 kHz Air shelf at Nyquist.
 //
 // It belongs to MSEB alone. The graphic equaliser and the parametric keep the
 // separate headroom further down, which is a Sonix stage and is not this: the
@@ -1597,6 +1627,22 @@ void eq_response_curve(const int *freqs, int count, int sample_rate, int *out_te
 #define MSEB_SEARCH_ROUNDS 10
 #define MSEB_SEARCH_RATIO 0.2f
 #define MSEB_SEARCH_FLOOR 1.0e-6f
+
+// The two calibration points of the correction above, tied to issue #180: the
+// stock player is reported clean at Extended Bass 60, starts to distort at 70
+// and is no worse than this build at 100. 0.73 puts v=60 at the stock level
+// (net +9.1 dB) and 10.3 dB is the net stock reaches at 70, used as the ceiling
+// for the rest of the range. They are calibration points and not filter design:
+// retune both together if the reporter's test says so.
+#define MSEB_STOCK_NET_SCALE 0.73f
+#define MSEB_NET_CEILING_DB 10.3f
+
+// The stock search and the measured peak, both from the one sweep.
+typedef struct {
+	float pregain_db; // the stock-style weighted normalisation; may be positive
+	float peak_db;	  // highest |H| of the bank: grid plus analytic endpoints
+	bool boosts;	  // at least one built filter has a declared gain > 0 dB
+} mseb_level_t;
 
 // The weights, which depend on nothing and are built once. The heaviest point
 // is around 100 Hz and the weight falls away towards the top of the band, so
@@ -1625,8 +1671,17 @@ static void mseb_weights_build(void) {
 // the settings page, which runs on the interface thread while the audio thread
 // is using those same filters -- and which is asked with nothing playing at
 // all, when the chain holds whatever the last track left in it.
-static int mseb_bank_build(biquad_t *out, int rate) {
+static int mseb_bank_build(biquad_t *out, int rate, bool *boosts, float *dc_db, float *nyq_db) {
 	int count = 0;
+	if (boosts) {
+		*boosts = false;
+	}
+	if (dc_db) {
+		*dc_db = 0.0f;
+	}
+	if (nyq_db) {
+		*nyq_db = 0.0f;
+	}
 	if (!mseb_enabled) {
 		return 0;
 	}
@@ -1634,22 +1689,55 @@ static int mseb_bank_build(biquad_t *out, int rate) {
 		double gain = (double)mseb_value[MSEB_DEFS[i].slider] * (double)MSEB_DEFS[i].db_per_step;
 		memset(&out[count], 0, sizeof(out[count]));
 		if (biquad_set_coeffs(&out[count], MSEB_DEFS[i].type, MSEB_DEFS[i].freq, gain, (double)MSEB_DEFS[i].q, rate)) {
+			// Only a filter that made it into the chain counts. One rejected for
+			// being at or above Nyquist is not there to boost anything, and the
+			// declared gain is what decides, not the combined peak: Temperature
+			// runs at -0.06 dB/step, so a negative slider value is a boost.
+			if (boosts && gain > 0.0) {
+				*boosts = true;
+			}
+			// The endpoints, analytically: a low shelf holds its declared gain
+			// at DC, a high shelf at Nyquist, and a peak is unity at both. Only
+			// those three shapes exist in this bank.
+			if (dc_db && MSEB_DEFS[i].type == F_LOWSHELF) {
+				*dc_db += (float)gain;
+			}
+			if (nyq_db && MSEB_DEFS[i].type == F_HIGHSHELF) {
+				*nyq_db += (float)gain;
+			}
 			count++;
 		}
 	}
 	return count;
 }
 
-static float mseb_auto_preamp_db(int rate) {
+// Stock search and peak in one sweep. `peak_db` is the maximum response of the
+// cascade over the audio band, used by the correction below; `pregain_db` is
+// the stock's own weighted bisection, unchanged.
+//
+// The 128-point grid runs from 20 Hz to just under 19 kHz. Two endpoints are
+// added analytically, not by evaluating the transfer function there: with the
+// stored float coefficients `1 + a1 + a2` is only ~4.2e-5 at DC, so a numerical
+// probe loses precision (it reads 14.9956 dB for a +15.00 dB shelf), while the
+// asymptote is exact. A 70 Hz low shelf holds its declared gain at DC (+25.00
+// dB at value 100 where the 20 Hz grid point reads +24.67) and a 10 kHz high
+// shelf holds its declared gain at Nyquist, which a 22.05 kHz file can reach.
+// A peak filter is unity at both. Neither asymptote enters response[] or the
+// bisection, so the stock search is bit-for-bit what it was.
+static mseb_level_t mseb_level_measure(int rate) {
+	mseb_level_t level = {0.0f, 0.0f, false};
 	biquad_t bank[MSEB_FILTERS];
-	int count = mseb_bank_build(bank, rate);
+	float dc_db = 0.0f;
+	float nyq_db = 0.0f;
+	int count = mseb_bank_build(bank, rate, &level.boosts, &dc_db, &nyq_db);
 	if (count == 0) {
-		return 0.0f; // nothing to normalise: unity, the way the stock leaves it
+		return level; // nothing to normalise: unity, the way the stock leaves it
 	}
 
 	mseb_weights_build();
 
 	float response[MSEB_PROBE_POINTS];
+	float peak = -200.0f; // below any real response; the bank may only cut
 	for (int i = 0; i < MSEB_PROBE_POINTS; i++) {
 		double freq = pow(10.0, log10(MSEB_PROBE_START_HZ) + MSEB_PROBE_DECADES * (double)i / MSEB_PROBE_POINTS);
 		double w = 2.0 * M_PI * freq / (double)rate;
@@ -1669,7 +1757,23 @@ static float mseb_auto_preamp_db(int rate) {
 			power *= biquad_power_ratio_at(&bank[f], cos1, sin1, cos2, sin2);
 		}
 		response[i] = power > 0.0 ? (float)(10.0 * log10(power)) : 0.0f;
+		if (response[i] > peak) {
+			peak = response[i];
+		}
 	}
+
+	// The analytic endpoints from the bank build, not a numerical transfer
+	// function at z = +1 / -1 (see the comment over mseb_bank_build()).
+	if (dc_db > peak) {
+		peak = dc_db;
+	}
+	if (nyq_db > peak) {
+		peak = nyq_db;
+	}
+	if (peak < -199.0f) {
+		peak = 0.0f; // no usable probe: treat the bank as flat
+	}
+	level.peak_db = peak;
 
 	float low = -100.0f;
 	float high = 100.0f;
@@ -1703,6 +1807,35 @@ static float mseb_auto_preamp_db(int rate) {
 		}
 	}
 
+	level.pregain_db = p;
+	return level;
+}
+
+// The stock value corrected by the policy above. A cut-only bank keeps the
+// stock number verbatim, including its positive make-up gain. A bank that
+// boosts anything has its net (pregain + peak) scaled to 0.73 of the stock net
+// and then held at the +10.3 dB ceiling. `capped` reports whether the ceiling
+// actually moved the value, for the diagnostic log.
+static float mseb_effective_db(const mseb_level_t *level, bool *capped) {
+	float p = level->pregain_db;
+	if (capped) {
+		*capped = false;
+	}
+	if (!level->boosts) {
+		return p; // cutting-only: stock value, even if positive
+	}
+
+	float net = p + level->peak_db;
+	if (net > 0.0f) {
+		p -= (1.0f - MSEB_STOCK_NET_SCALE) * net;
+		net = p + level->peak_db;
+	}
+	if (net > MSEB_NET_CEILING_DB) {
+		p -= net - MSEB_NET_CEILING_DB;
+		if (capped) {
+			*capped = true;
+		}
+	}
 	return p;
 }
 
@@ -1712,7 +1845,7 @@ static void filters_rebuild(int rate) {
 	int active = 0;
 
 	// MSEB's gains stay out of max_boost: its level is settled by its own
-	// pre-gain, further down, on the algorithm the stock module uses.
+	// pre-gain, further down, on the stock algorithm plus the #180 correction.
 	for (int i = 0; i < MSEB_FILTERS; i++) {
 		double gain = mseb_enabled ? (double)mseb_value[MSEB_DEFS[i].slider] * MSEB_DEFS[i].db_per_step : 0.0;
 		slot_update(i, MSEB_DEFS[i].type, MSEB_DEFS[i].freq, gain, MSEB_DEFS[i].q, rate, rate_changed);
@@ -1766,8 +1899,12 @@ static void filters_rebuild(int rate) {
 	}
 
 	// MSEB's own level, from its own bank. Its filters are the first thing the
-	// sample meets, and this is applied immediately in front of them.
-	mseb_pregain_db = mseb_auto_preamp_db(rate);
+	// sample meets, and this is applied immediately in front of them. The stock
+	// search is the base; mseb_effective_db() applies the #180 correction.
+	mseb_level_t level = mseb_level_measure(rate);
+	float stock_db = level.pregain_db;
+	bool capped = false;
+	mseb_pregain_db = mseb_effective_db(&level, &capped);
 	mseb_pregain_target = (float)pow(10.0, (double)mseb_pregain_db / 20.0);
 
 	// The anti-clip headroom (the stock's geq_pre_gain), for the graphic
@@ -1784,6 +1921,15 @@ static void filters_rebuild(int rate) {
 	// of the full headroom.
 	double manual = peq_enabled ? (double)peq_preamp_tenths / 10.0 : 0.0;
 	pregain_target = (float)pow(10.0, headroom_db(max_boost, manual) / 20.0);
+
+	// Anything that can put a sample above unity needs the soft clip; a chain
+	// that cannot exceed unity keeps the old hard clamp and stays
+	// bit-transparent above the knee. The MSEB net covers the stock make-up
+	// gain a cut-only bank can hand back (Temperature +100 is about +11 dB with
+	// no positive filter at all).
+	double mseb_net_db = (double)mseb_pregain_db + (double)level.peak_db;
+	clip_guard = level.boosts || mseb_net_db > 0.0 || max_boost > 0.0 || manual > 0.0;
+
 	if (rate_changed) {
 		pregain = pregain_target;
 		mseb_pregain = mseb_pregain_target;
@@ -1791,8 +1937,11 @@ static void filters_rebuild(int rate) {
 
 	built_version = settings_version;
 	built_rate = rate;
-	fprintf(stderr, "eq: rebuilt (%d filters at %d Hz, mseb pregain %+.2f dB -> %.4f, geq/peq pregain -> %.3f)\n",
-			active, rate, (double)mseb_pregain_db, (double)mseb_pregain_target, (double)pregain_target);
+	fprintf(stderr,
+			"eq: rebuilt (%d filters at %d Hz, mseb stock %+.2f, peak %+.2f, pregain %+.2f (net %+.2f%s) -> %.4f, "
+			"geq/peq pregain -> %.3f)\n",
+			active, rate, (double)stock_db, (double)level.peak_db, (double)mseb_pregain_db, mseb_net_db,
+			capped ? ", capped" : "", (double)mseb_pregain_target, (double)pregain_target);
 }
 
 // ---------------------------------------------------------------------------
@@ -1854,7 +2003,8 @@ int peq_response_tenths(int freq, int sample_rate) {
 
 int eq_auto_headroom_tenths(void) {
 	double max_boost = 0;
-	double total = (double)mseb_auto_preamp_db(EQ_HEADROOM_REFERENCE_RATE);
+	mseb_level_t level = mseb_level_measure(EQ_HEADROOM_REFERENCE_RATE);
+	double total = (double)mseb_effective_db(&level, NULL);
 
 	if (eq_enabled) {
 		max_boost = graphic_peak_db(EQ_HEADROOM_REFERENCE_RATE);
@@ -2122,6 +2272,35 @@ static bool process_prepare(int frame_count, int channels, int sample_rate) {
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// The final guard: an asymptotic soft clip in the 16-bit sample scale.
+//
+// Both entry points below run the chain in that scale (eq_process_s32 scales
+// by 1/65536 going in and back out), so one curve serves both. Below the knee
+// it is the identity: no multiply, no divide, denormals untouched. Above it,
+//
+//     y = sign(x) * (FS - A^2 / (A + |x| - T)),   A = FS - T
+//
+// which is continuous at T (y(T) = T, y'(T) = 1), monotonic, never boosts and
+// approaches FS without reaching it. That is the point: the old hard clamp
+// turned every overload into a flat-topped square wave, which is what issue
+// #180 hears as a broken driver. This compresses it instead, and keeps the
+// output inside the valid 16-bit range. A branch is all it costs -- no fabsf,
+// no tanh, no libm call in the audio loop.
+// ---------------------------------------------------------------------------
+#define EQ_CLIP_FS 32767.0f
+#define EQ_CLIP_KNEE (0.95f * EQ_CLIP_FS)
+#define EQ_CLIP_ROOM (EQ_CLIP_FS - EQ_CLIP_KNEE)
+
+static inline float soft_clip_sample(float x) {
+	float a = x < 0.0f ? -x : x;
+	if (a <= EQ_CLIP_KNEE) {
+		return x;
+	}
+	float y = EQ_CLIP_FS - (EQ_CLIP_ROOM * EQ_CLIP_ROOM) / (EQ_CLIP_ROOM + (a - EQ_CLIP_KNEE));
+	return x < 0.0f ? -y : y;
+}
+
 void eq_process(short *frames, int frame_count, int channels, int sample_rate) {
 	if (!process_prepare(frame_count, channels, sample_rate)) {
 		return;
@@ -2129,6 +2308,11 @@ void eq_process(short *frames, int frame_count, int channels, int sample_rate) {
 
 	// Per-sample pregain step sized for a ~20 ms glide at this rate.
 	float step = 1.0f / ((float)sample_rate * 0.02f);
+
+	// The settled guard can be false while a make-up gain is still gliding
+	// down from a louder setting; keep the soft clip on for that whole buffer
+	// so the transient cannot take the hard-clamp path.
+	bool guard = clip_guard || mseb_pregain > 1.0f || pregain > 1.0f;
 
 	for (int done = 0; done < frame_count; done += EQ_PASS_FRAMES) {
 		int n = frame_count - done < EQ_PASS_FRAMES ? frame_count - done : EQ_PASS_FRAMES;
@@ -2141,6 +2325,11 @@ void eq_process(short *frames, int frame_count, int channels, int sample_rate) {
 		chain_run_pass(n, channels, step);
 		for (int i = 0; i < samples; i++) {
 			float x = pass_buf[i];
+			if (guard) {
+				x = soft_clip_sample(x);
+			}
+			// The hard clamp stays as a safety net for the non-boosting path
+			// and for anything the soft clip is handed that is not finite.
 			if (x > 32767.0f) {
 				x = 32767.0f;
 			} else if (x < -32768.0f) {
@@ -2158,6 +2347,10 @@ void eq_process_s32(int32_t *frames, int frame_count, int channels, int sample_r
 
 	float step = 1.0f / ((float)sample_rate * 0.02f);
 
+	// Same transient rule as eq_process(): a running make-up gain above unity
+	// keeps the soft clip on while it glides down.
+	bool guard = clip_guard || mseb_pregain > 1.0f || pregain > 1.0f;
+
 	// The filters run in the same float chain either width uses; the samples
 	// are scaled down to the 16-bit range on the way in and back up on the way
 	// out, so the coefficients' numeric range (and the shared z-state, when a
@@ -2174,6 +2367,9 @@ void eq_process_s32(int32_t *frames, int frame_count, int channels, int sample_r
 		chain_run_pass(n, channels, step);
 		for (int i = 0; i < samples; i++) {
 			float x = pass_buf[i];
+			if (guard) {
+				x = soft_clip_sample(x);
+			}
 			if (x > 32767.0f) {
 				x = 32767.0f;
 			} else if (x < -32768.0f) {

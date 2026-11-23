@@ -173,12 +173,16 @@ int peq_response_tenths(int freq, int sample_rate);
 //   - the headroom taken off the graphic equaliser and the parametric, an
 //     attenuation equal to their most boosted band, less whatever a negative
 //     parametric preamp already takes off, so never above zero;
-//   - MSEB's own normalisation, which is not a clip guard and can go either
-//     way (see the note over mseb_auto_preamp_db in eq.c).
+//   - MSEB's own level, which is the stock module's weighted normalisation
+//     corrected for issue #180: a bank that boosts anything has its net gain
+//     scaled to 0.73 of the stock net and held at a +10.3 dB ceiling, so it
+//     can still go positive but no further than the stock onset level. A
+//     cutting-only bank keeps the stock value verbatim, make-up gain included
+//     (see mseb_level_measure()/mseb_effective_db() in eq.c).
 //
-// So the total may be positive, and a positive number is not a bug: a mostly
-// cutting MSEB setting hands some level back, which is what the stock player
-// does too.
+// So the total may still be positive, and a positive number is not a bug: a
+// mostly cutting MSEB setting hands some level back, which is what the stock
+// player does too. That level is what the soft clip at the output guards.
 //
 // Worth showing because it is otherwise invisible: boosting a band by 8 dB
 // works, but the overall level drops by the same amount, and without a number
@@ -201,7 +205,8 @@ int eq_auto_headroom_tenths(void);
 // Ten sliders, thirteen filters: master_temp is a tilt made of four
 // overlapping high shelves. And the module carries a level of its own, which
 // the stock computes from the measured response of its bank rather than from
-// the boosts its sliders declare; eq.c has the whole of it.
+// the boosts its sliders declare; eq.c has the whole of it, including the
+// issue #180 correction that keeps a boosting curve near the stock level.
 // ---------------------------------------------------------------------------
 
 #define MSEB_BANDS 10
@@ -389,8 +394,9 @@ void crossfeed_process(short *frames, int frame_count, int channels, int sample_
 void crossfeed_process_s32(int32_t *frames, int frame_count, int channels, int sample_rate);
 
 // Applies MSEB + the graphic EQ in place to interleaved signed 16-bit PCM,
-// with automatic pre-gain so boosted bands cannot clip. A no-op when both are
-// disabled/flat. Audio thread only.
+// with automatic pre-gain so boosted bands cannot clip and an asymptotic soft
+// clip as the final guard when the chain can raise the level. A no-op when
+// both are disabled/flat. Audio thread only.
 void eq_process(short *frames, int frame_count, int channels, int sample_rate);
 
 // The same chain for the hi-res path: interleaved signed 32-bit samples
