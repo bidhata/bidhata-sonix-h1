@@ -307,6 +307,35 @@ static void open_playlist(const char *name) {
 	medialist_open(name, LIBRARY_LIST_PLAYLIST, LIBRARY_FILTER_NONE, name);
 }
 
+
+static char confirm_playlist[PLAYLIST_NAME_MAX + 1];
+
+static void add_pending_track_confirmed(void *user) {
+	(void)user;
+	if (!confirm_playlist[0] || !pending_track[0]) {
+		confirm_playlist[0] = '\0';
+		return;
+	}
+	if (playlists_add_track(confirm_playlist, pending_track)) {
+		toast_success("playlist_track_added");
+		back_btn_cb(NULL); // straight back to where the track was tapped
+	} else {
+		gui_notify_popup("playlist_cannot_add_the_track");
+	}
+	confirm_playlist[0] = '\0';
+}
+
+static void add_pending_batch_confirmed(void *user) {
+	(void)user;
+	if (!confirm_playlist[0] || pending_many_count <= 0) {
+		confirm_playlist[0] = '\0';
+		return;
+	}
+	batch_start(confirm_playlist);
+	confirm_playlist[0] = '\0';
+	back_btn_cb(NULL);
+}
+
 static void row_clicked_cb(lv_event_t *e) {
 	if (player_sheet_drag_active() || switcher_back_drag_active()) {
 		return; // a swipe across the list, not a tap
@@ -323,8 +352,30 @@ static void row_clicked_cb(lv_event_t *e) {
 	}
 
 	if (pending_many_count > 0) {
+		bool duplicate = false;
+		for (int i = 0; i < pending_many_count; i++) {
+			if (pending_many[i] && playlists_has_track(name, pending_many[i])) {
+				duplicate = true;
+				break;
+			}
+		}
+		if (duplicate) {
+			snprintf(confirm_playlist, sizeof(confirm_playlist), "%s", name);
+			confirm_show("Song already in playlist",
+						 "One or more of these songs are already in this playlist. Add them anyway?",
+						 "Add anyway", add_pending_batch_confirmed, NULL);
+			return;
+		}
 		batch_start(name);
 		back_btn_cb(NULL);
+		return;
+	}
+
+	if (pending_track[0] && playlists_has_track(name, pending_track)) {
+		snprintf(confirm_playlist, sizeof(confirm_playlist), "%s", name);
+		confirm_show("Song already in playlist",
+					 "This song is already in this playlist. Add it anyway?",
+					 "Add anyway", add_pending_track_confirmed, NULL);
 		return;
 	}
 
