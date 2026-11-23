@@ -461,6 +461,22 @@ $(THEME_COLOR_TEST_BIN): tools/test_theme_color.c src/gui/shell/theme_color.c sr
 clean:
 	rm -rf build_host build_target build_gen $(HOST_BIN) $(TARGET_BIN) $(TARGET_DEBUG_BIN) $(LAUNCH_BIN) compile_commands.json compile_flags.txt
 
+# ---------------------------------------------------------------------------
+# The AXP2101 charge state machine, on the host, against the register map
+# axpcharge.c keeps under HOST_BUILD. Test-only: nothing here is part of the
+# host or target builds.
+# ---------------------------------------------------------------------------
+AXPCHARGE_TEST_BIN = build_host/test_axpcharge
+.PHONY: test-axpcharge
+test-axpcharge: $(AXPCHARGE_TEST_BIN)
+	$(AXPCHARGE_TEST_BIN)
+
+$(AXPCHARGE_TEST_BIN): tools/test_axpcharge.c src/system/device/axpcharge.c \
+		src/system/device/axpcharge_test.h src/system/device/axpcharge.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DHOST_BUILD=1 -DAXPCHARGE_TEST=1 -o $@ \
+		tools/test_axpcharge.c src/system/device/axpcharge.c -lpthread
+
 # The bundled libraries and their extracted sources. The downloaded tarballs stay.
 .PHONY: libs-clean
 libs-clean:

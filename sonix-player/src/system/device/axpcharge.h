@@ -36,9 +36,43 @@ void axpcharge_tick(void);
 bool axpcharge_holding(void);
 
 // One register of the PMIC, read or written over the same bus. Both players
-// have the AXP2101, whichever of them charges. False when it does not answer,
-// and always on the host.
+// have the AXP2101, whichever of them charges. False when it does not answer.
+// On the host it reads and writes the simulator's register map.
 bool axpcharge_reg_read(uint8_t reg, uint8_t *value);
 bool axpcharge_reg_write(uint8_t reg, uint8_t value);
+
+// ---------------------------------------------------------------------------
+// Cell charging: REG18h[1], Cell Battery charge enable
+// ---------------------------------------------------------------------------
+//
+// The USB DAC page stops cell charging while the player is a DAC: on the R1
+// the same cable both feeds the system and the cell, and the host does not
+// have the current for both. This is a destructive write, so it has a gate of
+// its own rather than sharing axpcharge_applies()'s guess.
+
+// True only where the model table says the PMIC is the charger (the R1). The
+// host build answers true and simulates the write, so the simulator's toggle
+// keeps working. Never a guess from an absent MP2731 node.
+bool axpcharge_charging_control_supported(void);
+
+// Stops (or allows) charging the cell while leaving VBUS feeding the system.
+// A user request: on failure the requested state is put back to the last
+// confirmed one and nothing is retried, so the UI cannot show one state while
+// the next tick produces another. Returns true when the PMIC read back the
+// requested state.
+bool axpcharge_set_charging(bool on);
+
+// True while the PMIC has confirmed that cell charging is stopped.
+bool axpcharge_charging_blocked(void);
+
+// Re-enables charging. Called at startup, at DAC exit, at poweroff, and from
+// the crash handler. Unlike a user request this one is retried by the tick
+// until the PMIC confirms it. Returns the result of the immediate attempt.
+bool axpcharge_charging_release(void);
+
+// The crash handler's variant: never blocks and never logs. False when the
+// lock is held or the write fails, in which case the driver's own shutdown
+// write and the next boot's release are the backstops.
+bool axpcharge_charging_release_quiet(void);
 
 #endif /* AXPCHARGE_H */
