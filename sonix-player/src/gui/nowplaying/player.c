@@ -4216,6 +4216,10 @@ static void update_repeat_button(void) {
 		icon = &icon_shuffle_repeat;
 		color = active;
 		break;
+	case PLAYBACK_MODE_STOP_AFTER:
+		icon = &icon_repeat_stop;
+		color = active;
+		break;
 	case PLAYBACK_MODE_NORMAL:
 	default:
 		icon = &icon_repeat_off;

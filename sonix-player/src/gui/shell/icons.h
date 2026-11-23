@@ -28,6 +28,7 @@ extern const lv_image_dsc_t icon_autoeq_update;
 extern const lv_image_dsc_t icon_repeat_all;
 extern const lv_image_dsc_t icon_repeat_one;
 extern const lv_image_dsc_t icon_repeat_off;
+extern const lv_image_dsc_t icon_repeat_stop;
 extern const lv_image_dsc_t icon_play;
 extern const lv_image_dsc_t icon_pause;
 extern const lv_image_dsc_t icon_stop;

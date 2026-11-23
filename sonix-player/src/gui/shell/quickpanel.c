@@ -269,6 +269,10 @@ static void refresh_repeat_icon(void) {
 		glyph = &icon_shuffle_repeat;
 		color = active;
 		break;
+	case PLAYBACK_MODE_STOP_AFTER:
+		glyph = &icon_repeat_stop;
+		color = active;
+		break;
 	default:
 		glyph = &icon_repeat_off;
 		color = inactive;

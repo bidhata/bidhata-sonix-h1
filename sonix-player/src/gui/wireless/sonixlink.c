@@ -91,6 +91,8 @@ static int mode_to_wire(playback_mode_t mode) {
 		return SONIXLINK_MODE_SHUFFLE;
 	case PLAYBACK_MODE_SHUFFLE_REPEAT:
 		return SONIXLINK_MODE_SHUFFLE_REPEAT;
+	case PLAYBACK_MODE_STOP_AFTER:
+		return SONIXLINK_MODE_STOP_AFTER;
 	case PLAYBACK_MODE_NORMAL:
 	default:
 		return SONIXLINK_MODE_NORMAL;
@@ -110,6 +112,9 @@ static void wire_to_mode(int wire) {
 		break;
 	case SONIXLINK_MODE_SHUFFLE_REPEAT:
 		playlist_set_mode(PLAYBACK_MODE_SHUFFLE_REPEAT);
+		break;
+	case SONIXLINK_MODE_STOP_AFTER:
+		playlist_set_mode(PLAYBACK_MODE_STOP_AFTER);
 		break;
 	case SONIXLINK_MODE_NORMAL:
 	default:

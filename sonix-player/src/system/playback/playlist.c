@@ -1015,6 +1015,8 @@ bool playlist_move(int from, int to) {
 
 bool playlist_is_custom(void) { return custom_queue; }
 
+bool playlist_is_ordered(void) { return ordered_queue; }
+
 void playlist_set_custom(bool custom) { custom_queue = custom; }
 
 unsigned playlist_revision(void) { return revision; }
@@ -1271,6 +1273,14 @@ bool playlist_advance_auto(char *out, size_t out_size) {
 	if (entry_count == 0)
 		return false;
 
+	// Play this track once, then stop -- regardless of what follows in the queue.
+	// Asked before the shuffle/repeat modes, because it is a deliberate "no next
+	// track" rather than a queue that ran out. An ordered queue is a podcast's
+	// episodes, where this music mode has nothing to say: it plays straight on.
+	if (mode == PLAYBACK_MODE_STOP_AFTER && !ordered_queue) {
+		return false;
+	}
+
 	// A queue that carries its own order is played straight through: one step
 	// forward, then stop. Shuffle and repeat mean nothing on a sequence of
 	// episodes, which is also why the player hides that button during a
@@ -1321,6 +1331,9 @@ bool playlist_advance_auto(char *out, size_t out_size) {
 
 bool playlist_peek_auto(char *out, size_t out_size) {
 	if (entry_count == 0 || !out) {
+		return false;
+	}
+	if (mode == PLAYBACK_MODE_STOP_AFTER && !ordered_queue) {
 		return false;
 	}
 	size_t next;
@@ -1427,6 +1440,9 @@ playback_mode_t playlist_cycle_mode(void) {
 	playback_mode_t old = mode;
 	switch (mode) {
 	case PLAYBACK_MODE_NORMAL:
+		mode = PLAYBACK_MODE_STOP_AFTER;
+		break;
+	case PLAYBACK_MODE_STOP_AFTER:
 		mode = PLAYBACK_MODE_REPEAT_ALL;
 		break;
 	case PLAYBACK_MODE_REPEAT_ALL:

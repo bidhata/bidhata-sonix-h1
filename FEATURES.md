@@ -56,7 +56,7 @@ This is everything Bidhata's Modded SonixOS can do today, on both the **R1** and
 
 ## Playback
 
-- **Playback modes** - normal, repeat all, repeat one, shuffle, and a continuous shuffle that deals a new order every round.
+- **Playback modes** - normal, stop after the current track, repeat all, repeat one, shuffle, and a continuous shuffle that deals a new order every round.
 - **Play albums back to back** - when an album ends, the next one starts.
 - **Play by folder** - when a folder ends, playback goes on with the next folder.
 - **Add to queue** - as the next track or at the end.

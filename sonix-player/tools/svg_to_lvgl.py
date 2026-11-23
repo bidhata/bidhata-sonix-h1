@@ -65,6 +65,7 @@ ICONS = [
     ("repeat.svg", "repeat_all", 30),
     ("repeat-1.svg", "repeat_one", 30),
     ("repeat-off.svg", "repeat_off", 30),
+    ("repeat-stop.svg", "repeat_stop", 30),
     ("play.svg", "play", 40),
     ("pause.svg", "pause", 40),
     # A live stream has no position to come back to, so on a radio the same

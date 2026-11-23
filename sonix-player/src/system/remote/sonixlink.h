@@ -122,13 +122,14 @@ typedef struct {
 	long long history_revision;
 } sonixlink_state_t;
 
-// The five orders the player understands, in the order the phone cycles them.
+// The orders the player understands, in the order the phone cycles them.
 typedef enum {
 	SONIXLINK_MODE_NORMAL = 0,	 // play through the queue and stop
 	SONIXLINK_MODE_REPEAT_ALL,	 // loop the queue
 	SONIXLINK_MODE_REPEAT_ONE,	 // loop this track
 	SONIXLINK_MODE_SHUFFLE,		 // random, once through
 	SONIXLINK_MODE_SHUFFLE_REPEAT, // the same random order, over and over
+	SONIXLINK_MODE_STOP_AFTER,	 // play this track, then stop
 } sonixlink_mode_t;
 
 typedef enum {

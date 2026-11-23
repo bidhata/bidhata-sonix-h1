@@ -650,6 +650,8 @@ static const char *mode_name(int mode) {
 		return "shuffle";
 	case SONIXLINK_MODE_SHUFFLE_REPEAT:
 		return "shuffle_repeat";
+	case SONIXLINK_MODE_STOP_AFTER:
+		return "stop_after";
 	case SONIXLINK_MODE_NORMAL:
 	default:
 		return "normal";
@@ -671,6 +673,9 @@ static int mode_from_name(const char *name) {
 	}
 	if (strcmp(name, "shuffle_repeat") == 0) {
 		return SONIXLINK_MODE_SHUFFLE_REPEAT;
+	}
+	if (strcmp(name, "stop_after") == 0) {
+		return SONIXLINK_MODE_STOP_AFTER;
 	}
 	if (strcmp(name, "normal") == 0 || strcmp(name, "off") == 0) {
 		return SONIXLINK_MODE_NORMAL;
