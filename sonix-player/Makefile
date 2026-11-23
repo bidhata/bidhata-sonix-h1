@@ -396,6 +396,20 @@ build_target/lvgl/%.o: $(LVGL_DIR)/%.c $(TARGET_FLAGS_STAMP)
 compile_commands.json:
 	@python3 generate_compile_commands.py
 
+# ---------------------------------------------------------------------------
+# The accent's colour maths, on the host. Pure functions over lv_color_t, with
+# no LVGL library and no display: theme_color.c is the same file the player
+# builds. Test-only: nothing here is part of the host or target builds.
+# ---------------------------------------------------------------------------
+THEME_COLOR_TEST_BIN = build_host/test_theme_color
+.PHONY: test-theme-color
+test-theme-color: $(THEME_COLOR_TEST_BIN)
+	$(THEME_COLOR_TEST_BIN)
+
+$(THEME_COLOR_TEST_BIN): tools/test_theme_color.c src/gui/shell/theme_color.c src/gui/shell/theme_color.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DHOST_BUILD=1 -o $@ tools/test_theme_color.c src/gui/shell/theme_color.c -lm
+
 clean:
 	rm -rf build_host build_target build_gen $(HOST_BIN) $(TARGET_BIN) $(TARGET_DEBUG_BIN) $(LAUNCH_BIN) compile_commands.json compile_flags.txt
 

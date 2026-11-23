@@ -1999,6 +1999,15 @@ static void repaint_page(page_t *p) {
 	}
 	if (p->resume_btn) {
 		lv_obj_set_style_bg_color(p->resume_btn, theme()->accent, 0);
+		uint32_t children = lv_obj_get_child_count(p->resume_btn);
+		for (uint32_t i = 0; i < children; i++) {
+			lv_obj_t *child = lv_obj_get_child(p->resume_btn, (int32_t)i);
+			if (lv_obj_check_type(child, &lv_image_class)) {
+				lv_obj_set_style_image_recolor(child, theme_on_accent(), 0);
+			} else {
+				lv_obj_set_style_text_color(child, theme_on_accent(), 0);
+			}
+		}
 	}
 	if (p->page) {
 		paint_pills(p);
@@ -2226,12 +2235,12 @@ static void build_page(page_t *p, gui_config_t *cfg) {
 	lv_obj_add_event_cb(p->resume_btn, resume_cb, LV_EVENT_CLICKED, p);
 	lv_obj_t *play_icon = lv_image_create(p->resume_btn);
 	lv_image_set_src(play_icon, &icon_play_small);
-	lv_obj_set_style_image_recolor(play_icon, lv_color_white(), 0);
+	lv_obj_set_style_image_recolor(play_icon, theme_on_accent(), 0);
 	lv_obj_set_style_image_recolor_opa(play_icon, LV_OPA_COVER, 0);
 	lv_obj_t *play_label = lv_label_create(p->resume_btn);
 	lv_label_set_text(play_label, tr("podcast_resume_listening"));
 	lv_obj_set_style_text_font(play_label, &font_ui_22, 0);
-	lv_obj_set_style_text_color(play_label, lv_color_white(), 0);
+	lv_obj_set_style_text_color(play_label, theme_on_accent(), 0);
 	lv_obj_set_hidden(p->resume_btn, true);
 
 	if (!p->feed) {
@@ -2299,7 +2308,7 @@ static void build_page(page_t *p, gui_config_t *cfg) {
 	lv_obj_add_event_cb(p->sel_action_btn, sel_action_cb, LV_EVENT_CLICKED, p);
 	lv_obj_t *action_icon = lv_image_create(p->sel_action_btn);
 	lv_image_set_src(action_icon, p->feed ? &icon_download : &icon_trash);
-	lv_obj_set_style_image_recolor(action_icon, lv_color_white(), 0);
+	lv_obj_set_style_image_recolor(action_icon, p->feed ? theme_on_accent() : lv_color_white(), 0);
 	lv_obj_set_style_image_recolor_opa(action_icon, LV_OPA_COVER, 0);
 	lv_obj_center(action_icon);
 	lv_obj_set_hidden(p->sel_action_btn, true);

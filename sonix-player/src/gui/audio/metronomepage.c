@@ -439,6 +439,7 @@ static void refresh_theme(void) {
 		lv_obj_set_style_text_color(pill_labels[i], t->text_primary, 0);
 	}
 	lv_obj_set_style_bg_color(play_btn, t->accent, 0);
+	lv_obj_set_style_image_recolor(play_glyph, theme_on_accent(), 0);
 	theme_apply_slider_knob(slider);
 	paint_dots();
 	lv_obj_invalidate(drawing);
@@ -572,7 +573,7 @@ void metronomepage_init(gui_config_t *cfg) {
 	// On the press, not the release: a tap is timed by when the finger lands.
 	lv_obj_add_event_cb(pill_btns[0], tap_cb, LV_EVENT_PRESSED, NULL);
 	play_btn = round_button(bottom, PLAY_BTN, &icon_play_large, &play_glyph);
-	lv_obj_set_style_image_recolor(play_glyph, lv_color_white(), 0);
+	lv_obj_set_style_image_recolor(play_glyph, theme_on_accent(), 0);
 	lv_obj_set_style_image_recolor_opa(play_glyph, LV_OPA_COVER, 0);
 	lv_obj_add_event_cb(play_btn, play_cb, LV_EVENT_CLICKED, NULL);
 	pill_btns[1] = pill_button(bottom, BEAT_NAMES[metronome_beats()], &pill_labels[1]);

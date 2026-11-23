@@ -73,10 +73,42 @@ void theme_toggle(void);
 // The accent colour, chosen from a fixed set of presets (Appearance > Accent
 // colour): 0 blue (default), 1 orange, 2 yellow, 3 green, 4 purple, 5 pink.
 // Applies to both dark and light palettes, persists in the config.
+//
+// The custom colour (Appearance > Custom colour) is any RGB the user picks. It
+// lives beside the preset in the config, so ui/accent stays a 0..5 index for
+// the boot logo, which is drawn before the player can read a colour: while a
+// custom colour is active theme_get_accent() reports the closest preset.
 #define THEME_ACCENT_COUNT 6
 lv_color_t theme_accent_preset(int index);
 int theme_get_accent(void);
 void theme_set_accent(int index);
+
+// True while the custom colour, rather than a preset, is the live accent.
+bool theme_accent_is_custom(void);
+
+// The custom colour last committed, whether or not it is the live one.
+lv_color_t theme_accent_custom_color(void);
+
+// The accent the interface is using right now.
+lv_color_t theme_accent_color(void);
+
+// White or near-black, whichever reads on a fill of the live accent. Use it
+// for text and monochrome glyphs painted on top of theme_style_accent_bg or a
+// hand-set accent fill; a hard-coded white disappears on a pale custom colour.
+lv_color_t theme_on_accent(void);
+
+// Applies a colour to the interface without saving it or touching the boot
+// logo: what the picker shows while the finger is on a slider. Call
+// theme_restore_accent() to put the persisted choice back.
+void theme_preview_accent(lv_color_t color);
+
+// Commits `color` as the custom accent: both palettes, the config, and the
+// closest preset for the boot logo. Saves once.
+void theme_set_accent_custom(lv_color_t color);
+
+// Re-applies the accent that is persisted in the config, without writing it
+// back. For leaving the picker without committing.
+void theme_restore_accent(void);
 
 // Picks a specific theme rather than flipping; no-op when already active.
 void theme_set_dark(bool dark);

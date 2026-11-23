@@ -6,8 +6,10 @@
 
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/nowplaying/player.h"
+#include "src/gui/settings/accentpage.h"
 #include "src/gui/settings/bootlogopage.h"
 #include "src/gui/shell/corners.h"
+#include "src/gui/shell/icons.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
@@ -26,6 +28,12 @@ static lv_obj_t *battery_percent_toggle;
 static lv_obj_t *statusbar_always_toggle;
 static lv_obj_t *rounded_corners_toggle;
 static lv_obj_t *text_size_pill[2]; // normal / large
+
+// The seventh swatch, which opens the picker, and the hex value the row under
+// the swatches shows.
+static lv_obj_t *btn_accent_custom;
+static lv_obj_t *btn_accent_custom_icon;
+static lv_obj_t *custom_value;
 // The status bar draws the battery either way; this setting is only about the
 // number beside it, and is on by default.
 static void battery_percent_cb(lv_event_t *e) {
@@ -86,27 +94,60 @@ static void refresh_buttons(void) {
 	lv_obj_t *off = dark ? btn_light : btn_dark;
 
 	lv_obj_set_style_bg_color(on, theme()->accent, 0);
-	lv_obj_set_style_text_color(lv_obj_get_child(on, 0), lv_color_white(), 0);
+	lv_obj_set_style_text_color(lv_obj_get_child(on, 0), theme_on_accent(), 0);
 
 	lv_obj_set_style_bg_color(off, theme()->surface_pressed, 0);
 	lv_obj_set_style_text_color(lv_obj_get_child(off, 0), theme()->text_primary, 0);
 }
 
-// The active circle wears a ring in the text colour; the rest sit flat.
+// The active circle wears a ring in the text colour; the rest sit flat. While
+// a custom colour is live no preset is the choice, so the seventh circle is
+// ringed instead.
 static void refresh_accent_buttons(void) {
+	bool custom = theme_accent_is_custom();
 	int active_accent = theme_get_accent();
 	for (int i = 0; i < THEME_ACCENT_COUNT; i++) {
 		if (!btn_accent[i]) {
 			continue;
 		}
 		lv_obj_set_style_bg_color(btn_accent[i], theme_accent_preset(i), 0);
-		if (i == active_accent) {
+		if (!custom && i == active_accent) {
 			lv_obj_set_style_border_width(btn_accent[i], 3, 0);
 			lv_obj_set_style_border_color(btn_accent[i], theme()->text_primary, 0);
 			lv_obj_set_style_border_opa(btn_accent[i], LV_OPA_COVER, 0);
 		} else {
 			lv_obj_set_style_border_width(btn_accent[i], 0, 0);
 		}
+	}
+
+	if (!btn_accent_custom) {
+		return;
+	}
+	lv_obj_set_style_bg_color(btn_accent_custom, custom ? theme_accent_custom_color() : theme()->surface_pressed, 0);
+	lv_obj_set_style_image_recolor(btn_accent_custom_icon, custom ? theme_on_accent() : theme()->text_primary, 0);
+	lv_obj_set_style_image_recolor_opa(btn_accent_custom_icon, LV_OPA_COVER, 0);
+	if (custom) {
+		lv_obj_set_style_border_width(btn_accent_custom, 3, 0);
+		lv_obj_set_style_border_color(btn_accent_custom, theme()->text_primary, 0);
+		lv_obj_set_style_border_opa(btn_accent_custom, LV_OPA_COVER, 0);
+	} else {
+		lv_obj_set_style_border_width(btn_accent_custom, 0, 0);
+	}
+}
+
+// The row under the swatches: the current colour as a hex value, or an
+// invitation to choose one. The colour is stored as 0xRRGGBB in the config, so
+// the same six digits are what the user sees.
+static void refresh_custom_value(void) {
+	if (!custom_value) {
+		return;
+	}
+	if (theme_accent_is_custom()) {
+		lv_color_t c = theme_accent_custom_color();
+		lv_label_set_text_fmt(custom_value, "#%02x%02x%02x", (unsigned)c.red, (unsigned)c.green,
+							  (unsigned)c.blue);
+	} else {
+		lv_label_set_text(custom_value, tr("appearance_choose"));
 	}
 }
 
@@ -127,6 +168,25 @@ static lv_obj_t *make_accent_circle(lv_obj_t *parent, int index) {
 	return btn;
 }
 
+// The way to any colour: a plus on the same 48 px circle as the presets. Empty
+// while no custom colour exists, filled with it once one does.
+static lv_obj_t *make_custom_circle(lv_obj_t *parent) {
+	lv_obj_t *btn = lv_btn_create(parent);
+	lv_obj_set_size(btn, 48, 48);
+	lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_shadow_width(btn, 0, 0);
+	lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(btn, 0, 0);
+	lv_obj_add_event_cb(btn, switch_screen_cb, LV_EVENT_CLICKED, accentpage_screen);
+
+	btn_accent_custom_icon = lv_image_create(btn);
+	lv_image_set_src(btn_accent_custom_icon, &icon_plus);
+	lv_obj_add_style(btn_accent_custom_icon, &theme_style_icon, 0);
+	lv_obj_center(btn_accent_custom_icon);
+
+	return btn;
+}
+
 // Paints the clock-position pills the same way: accent on the active one.
 static void refresh_clock_buttons(void) {
 	int active = (int)config_get_int("screen", "clock_pos", TOPBAR_CLOCK_CENTER);
@@ -136,7 +196,7 @@ static void refresh_clock_buttons(void) {
 		}
 		if (i == active) {
 			lv_obj_set_style_bg_color(btn_clock[i], theme()->accent, 0);
-			lv_obj_set_style_text_color(lv_obj_get_child(btn_clock[i], 0), lv_color_white(), 0);
+			lv_obj_set_style_text_color(lv_obj_get_child(btn_clock[i], 0), theme_on_accent(), 0);
 		} else {
 			lv_obj_set_style_bg_color(btn_clock[i], theme()->surface_pressed, 0);
 			lv_obj_set_style_text_color(lv_obj_get_child(btn_clock[i], 0), theme()->text_primary, 0);
@@ -290,7 +350,9 @@ void appearance_init(gui_config_t *cfg) {
 	lv_obj_set_style_bg_opa(accent_row, 0, 0);
 	lv_obj_set_style_border_width(accent_row, 0, 0);
 	lv_obj_set_style_pad_all(accent_row, 0, 0);
-	lv_obj_set_style_pad_gap(accent_row, 14, 0);
+	// Ten, not fourteen: seven 48 px circles and their gaps have to fit the
+	// 410 px inside the card.
+	lv_obj_set_style_pad_gap(accent_row, 10, 0);
 	lv_obj_set_scrollable(accent_row, false);
 	lv_obj_set_flex_flow(accent_row, LV_FLEX_FLOW_ROW);
 	lv_obj_set_flex_align(accent_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -298,6 +360,11 @@ void appearance_init(gui_config_t *cfg) {
 	for (int i = 0; i < THEME_ACCENT_COUNT; i++) {
 		btn_accent[i] = make_accent_circle(accent_row, i);
 	}
+	btn_accent_custom = make_custom_circle(accent_row);
+
+	// A row that names the feature, so the seventh circle is not a guess, and
+	// carries the current colour once there is one.
+	settingsrow_add(container, "appearance_custom_accent", &custom_value, switch_screen_cb, accentpage_screen);
 
 	// Straight under the accent, because it is what the tint is made from: the
 	// same hue carried across the backgrounds, the cards and the status bar.
@@ -355,9 +422,11 @@ void appearance_init(gui_config_t *cfg) {
 	refresh_buttons();
 	refresh_clock_buttons();
 	refresh_accent_buttons();
+	refresh_custom_value();
 	refresh_text_size_pills();
 	theme_register_refresh(refresh_buttons);
 	theme_register_refresh(refresh_text_size_pills);
 	theme_register_refresh(refresh_clock_buttons);
 	theme_register_refresh(refresh_accent_buttons);
+	theme_register_refresh(refresh_custom_value);
 }

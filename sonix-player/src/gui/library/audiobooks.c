@@ -18,6 +18,7 @@
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
+#include "src/gui/shell/theme_color.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 #include "src/system/device/power.h"
@@ -1350,7 +1351,7 @@ static void paint_choice(lv_obj_t *btn, bool on) {
 		return;
 	}
 	lv_obj_set_style_bg_color(btn, on ? theme()->accent : theme()->surface_pressed, 0);
-	lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? theme_on_accent() : theme()->text_primary, 0);
 }
 
 static void refresh_control_buttons(void) {
@@ -1558,7 +1559,7 @@ static lv_obj_t *scan_make_button(const char *text, lv_color_t colour, lv_event_
 	lv_obj_t *label = lv_label_create(button);
 	lv_label_set_text(label, tr(text));
 	lv_obj_set_style_text_font(label, &font_ui_24, 0);
-	lv_obj_set_style_text_color(label, lv_color_white(), 0);
+	lv_obj_set_style_text_color(label, theme_color_on(colour), 0);
 	lv_obj_center(label);
 
 	return button;

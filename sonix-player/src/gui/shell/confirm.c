@@ -86,7 +86,7 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, bool accent, lv
 	lv_obj_t *label = lv_label_create(btn);
 	lv_label_set_text(label, tr(text));
 	lv_obj_set_style_text_font(label, &font_ui_24, 0);
-	lv_obj_set_style_text_color(label, accent ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_set_style_text_color(label, accent ? theme_on_accent() : theme()->text_primary, 0);
 	lv_obj_center(label);
 
 	if (label_out) {
@@ -163,6 +163,10 @@ void confirm_init(gui_config_t *cfg) {
 static void refresh_theme(void) {
 	if (ok_btn) {
 		lv_obj_set_style_bg_color(ok_btn, theme()->accent, 0);
+		// The label follows the fill; the build-time colour is only the first.
+		if (ok_label) {
+			lv_obj_set_style_text_color(ok_label, theme_on_accent(), 0);
+		}
 	}
 	if (cancel_label) {
 		lv_obj_set_style_text_color(cancel_label, theme()->text_primary, 0);

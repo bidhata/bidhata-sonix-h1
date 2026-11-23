@@ -96,7 +96,14 @@ static bool build_path(char *out, size_t out_size, const char *dir) {
 static void *write_thread(void *arg) {
 	job_t *job = arg;
 
+#ifdef HOST_BUILD
+	// The simulator has no mount to resolve: SONIX_SD_ROOT is the folder the
+	// browser uses as the card, and the screenshot goes there too, so the host
+	// path exercises the same writer as the device.
+	const char *root = getenv("SONIX_SD_ROOT");
+#else
 	const char *root = storage_sd_root();
+#endif
 	if (!root || !*root) {
 		printf("screenshot: no card to write to\n");
 		gui_notify_popup("screenshot_failed_no_card");

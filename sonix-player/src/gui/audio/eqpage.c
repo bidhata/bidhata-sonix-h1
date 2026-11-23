@@ -274,7 +274,7 @@ static void paint_knob(int band) {
 	lv_obj_set_pos(k, column_x(band) - size / 2, value_y(eq_get_band_tenths(band)) - size / 2);
 	lv_color_t accent = on ? theme()->accent : theme()->text_secondary;
 	lv_obj_set_style_bg_color(k, chosen ? accent : lv_color_white(), 0);
-	lv_obj_set_style_border_color(k, chosen ? lv_color_white() : accent, 0);
+	lv_obj_set_style_border_color(k, chosen ? theme_on_accent() : accent, 0);
 	lv_obj_set_style_border_width(k, chosen ? 3 : 4, 0);
 
 	char text[16];

@@ -322,7 +322,7 @@ void lyricsearch_init(gui_config_t *cfg) {
 	lv_obj_t *apply_label = lv_label_create(apply);
 	lv_label_set_text(apply_label, tr("lyrics_apply"));
 	lv_obj_set_style_text_font(apply_label, &font_ui_24, 0);
-	lv_obj_set_style_text_color(apply_label, lv_color_white(), 0);
+	lv_obj_set_style_text_color(apply_label, theme_on_accent(), 0);
 	lv_obj_center(apply_label);
 
 	show_list();

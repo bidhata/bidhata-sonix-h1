@@ -261,7 +261,7 @@ static void paint_pill(lv_obj_t *btn, bool on) {
 		return;
 	}
 	lv_obj_set_style_bg_color(btn, on ? theme()->accent : theme()->surface_pressed, 0);
-	lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? theme_on_accent() : theme()->text_primary, 0);
 }
 
 static void band_page_refresh(void) {
@@ -662,7 +662,7 @@ static void build_entry_layer(gui_config_t *cfg) {
 	entry_sign_btn = entry_key(pad, "+/-", NULL, entry_key_cb, '-', 31);
 	entry_ok_btn = entry_key(pad, tr("ok"), NULL, entry_accept_cb, 0, 100);
 	lv_obj_add_style(entry_ok_btn, &theme_style_accent_bg, 0);
-	lv_obj_set_style_text_color(lv_obj_get_child(entry_ok_btn, 0), lv_color_white(), 0);
+	lv_obj_set_style_text_color(lv_obj_get_child(entry_ok_btn, 0), theme_on_accent(), 0);
 }
 
 // The number over a slider becomes the way into the keypad: set on a rounded

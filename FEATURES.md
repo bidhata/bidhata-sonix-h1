@@ -181,7 +181,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Screen and appearance
 
-- **Dark and light theme**, accent colours, and a **dynamic tint** that colours the whole interface with the accent.
+- **Dark and light theme**, accent colours from six presets or **any colour** from the picker, and a **dynamic tint** that colours the whole interface with the accent.
 - **Text size** normal or large, **rounded corners**, battery percentage, and clock on the left, in the centre, on the right or hidden.
 - **Brightness** down to 1%, **screen-off time**, **double tap to wake**, and **rotate the screen** by 180°.
 - **Screensaver** - shows the cover of what is playing, or pictures from the `Screensaver` folder.

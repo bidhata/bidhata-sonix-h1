@@ -109,6 +109,11 @@
  * link.tidal.com with the code already filled in. */
 #define LV_USE_QRCODE 1
 
+/* The custom accent picker's hue strip has nine stops: eight sectors plus the
+ * wrap back to red. The limit is the fixed-size stop array in lv_grad_dsc_t,
+ * and the software renderer walks however many stops a descriptor uses. */
+#define LV_GRADIENT_MAX_STOPS 9
+
 /* The widgets that are never built. LVGL turns most of them on by default and
  * the Makefile links every source in the library, so without --gc-sections an
  * unused widget is still carried. Switching off one that is used fails to link.

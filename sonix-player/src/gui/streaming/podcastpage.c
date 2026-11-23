@@ -2487,7 +2487,7 @@ static void paint_pill(lv_obj_t *btn, bool on) {
 		return;
 	}
 	lv_obj_set_style_bg_color(btn, on ? theme()->accent : theme()->surface_pressed, 0);
-	lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? theme_on_accent() : theme()->text_primary, 0);
 	lv_obj_set_style_opa(btn, lv_obj_has_state(btn, LV_STATE_DISABLED) ? LV_OPA_40 : LV_OPA_COVER, 0);
 }
 
@@ -2912,7 +2912,7 @@ static void build_listen_row(listen_row_t *row, lv_obj_t *parent) {
 	lv_obj_add_event_cb(row->action, listen_action_cb, LV_EVENT_CLICKED, row);
 	row->action_icon = lv_image_create(row->action);
 	lv_image_set_src(row->action_icon, &icon_play_small);
-	lv_obj_set_style_image_recolor(row->action_icon, lv_color_white(), 0);
+	lv_obj_set_style_image_recolor(row->action_icon, theme_on_accent(), 0);
 	lv_obj_set_style_image_recolor_opa(row->action_icon, LV_OPA_COVER, 0);
 	lv_obj_center(row->action_icon);
 	lv_obj_set_event_bubble(row->action_icon, true);
