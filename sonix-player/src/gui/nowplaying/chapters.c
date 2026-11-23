@@ -12,16 +12,16 @@
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
+#include "src/system/core/lang.h"
 #include "src/system/playback/audiobook.h"
 #include "src/system/playback/device_state.h"
-#include "src/system/core/lang.h"
 
 lv_obj_t *chapters_screen;
 
-// Books run to dozens of chapters, occasionally a couple of hundred; the list
+// Books can have hundreds of chapters (e.g. 900+ in some editions); the list
 // is plainly rebuilt each time it opens, like the audiobook index itself. The
-// cap is there for a pathological file, not for any real book.
-#define MAX_ROWS 400
+// cap is there for a pathological file, not for real books.
+#define MAX_ROWS 2048
 #define ROW_HEIGHT 68
 #define ROW_RADIUS 12
 
