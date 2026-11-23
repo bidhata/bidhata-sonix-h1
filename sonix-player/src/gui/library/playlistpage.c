@@ -686,6 +686,7 @@ static lv_obj_t *import_body;	// the scrolling middle: rows, or the report
 static lv_obj_t *import_action; // the button along the bottom
 static lv_obj_t *import_action_label;
 static lv_obj_t *import_btn; // the corner button that opens all this
+static lv_obj_t *import_select_all;
 
 static playlists_candidate_t import_candidates[IMPORT_MAX_CANDIDATES];
 static bool import_selected[IMPORT_MAX_CANDIDATES];
@@ -804,6 +805,7 @@ static void report_add_entry(const import_entry_t *entry) {
 
 static void import_show_report(const import_result_t *result) {
 	lv_obj_clean(import_body);
+	lv_obj_set_hidden(import_select_all, true);
 	for (int i = 0; i < IMPORT_MAX_CANDIDATES; i++) {
 		import_ticks[i] = NULL;
 	}
@@ -897,6 +899,20 @@ static void import_row_clicked_cb(lv_event_t *e) {
 	import_tick_paint(index);
 }
 
+static void import_select_all_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	if (import_running || import_count <= 0) {
+		return;
+	}
+	for (int i = 0; i < import_count; i++) {
+		import_selected[i] = true;
+		import_tick_paint(i);
+	}
+}
+
 // False when nothing was started -- no playlist ticked, or no thread -- and the
 // rows are still there to choose from.
 static bool import_start(void) {
@@ -928,6 +944,7 @@ static bool import_start(void) {
 	// The waiting state: the rows go, because tapping them now would change a
 	// selection the worker has already taken a copy of.
 	lv_obj_clean(import_body);
+	lv_obj_set_hidden(import_select_all, true);
 	for (int i = 0; i < IMPORT_MAX_CANDIDATES; i++) {
 		import_ticks[i] = NULL;
 	}
@@ -984,8 +1001,14 @@ static bool import_confirm_overwrite(void) {
 		return false;
 	}
 
-	static char message[sizeof(names) + 256];
-	snprintf(message, sizeof(message), "%s%s", tr("playlist_overwrite_note"), names);
+	static char message[sizeof(names) + 512];
+	int head = snprintf(message, sizeof(message), tr("playlist_overwrite_count_d"), taken);
+	if (head < 0) {
+		head = 0;
+	} else if ((size_t)head >= sizeof(message)) {
+		head = (int)sizeof(message) - 1;
+	}
+	snprintf(message + head, sizeof(message) - (size_t)head, "\n%s%s\n\n%s", tr("playlist_overwrite_note"), names, tr("playlist_overwrite_warning"));
 	confirm_show("playlist_overwrite_title", message, "playlist_overwrite", import_overwrite_confirmed, NULL);
 	return true;
 }
@@ -1112,6 +1135,7 @@ static void import_btn_cb(lv_event_t *e) {
 	}
 
 	lv_obj_clean(import_body);
+	lv_obj_set_hidden(import_select_all, false);
 	for (int i = 0; i < IMPORT_MAX_CANDIDATES; i++) {
 		import_ticks[i] = NULL;
 		// Everything found, unless unticked -- except what would replace a
@@ -1548,6 +1572,25 @@ void playlistpage_init(gui_config_t *cfg) {
 	lv_obj_add_style(import_close_icon, &theme_style_icon, 0);
 	lv_obj_center(import_close_icon);
 
+	// One tap marks every candidate, including the ones that would replace a
+	// playlist on the player. It stays above the list so a long scroll cannot
+	// take it out of reach.
+	import_select_all = lv_btn_create(import_layer);
+	lv_obj_set_size(import_select_all, cfg->screen_width - 2 * cfg->padding, 52);
+	lv_obj_align(import_select_all, LV_ALIGN_TOP_LEFT, cfg->padding, content_top);
+	lv_obj_add_style(import_select_all, &theme_style_card, 0);
+	lv_obj_set_style_radius(import_select_all, ROW_RADIUS, 0);
+	lv_obj_set_style_border_width(import_select_all, 0, 0);
+	lv_obj_set_style_shadow_width(import_select_all, 0, 0);
+	lv_obj_add_event_cb(import_select_all, import_select_all_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_set_hidden(import_select_all, true);
+
+	lv_obj_t *select_all_label = lv_label_create(import_select_all);
+	lv_label_set_text(select_all_label, tr("playlist_select_all"));
+	lv_obj_set_style_text_font(select_all_label, &font_ui_24, 0);
+	lv_obj_set_style_text_color(select_all_label, theme()->accent, 0);
+	lv_obj_center(select_all_label);
+
 	// The button sits on the bottom edge; the list has whatever is left.
 	import_action = lv_btn_create(import_layer);
 	lv_obj_set_size(import_action, cfg->screen_width - 2 * cfg->padding, 62);
@@ -1564,7 +1607,7 @@ void playlistpage_init(gui_config_t *cfg) {
 	lv_obj_set_style_text_color(import_action_label, theme_on_accent(), 0);
 	lv_obj_center(import_action_label);
 
-	int import_top = content_top;
+	int import_top = content_top + 52 + ROW_GAP;
 	import_body = lv_obj_create(import_layer);
 	lv_obj_set_size(import_body, cfg->screen_width, cfg->screen_height - import_top - 62 - 2 * cfg->padding);
 	lv_obj_align(import_body, LV_ALIGN_TOP_LEFT, 0, import_top);

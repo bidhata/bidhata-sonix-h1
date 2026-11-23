@@ -52,7 +52,7 @@ This is everything Bidhata's Modded SonixOS can do today, on both the **R1** and
 - **Favourites** and **Most played** - the player counts how many times you listen to every track.
 - **Selection** - long press a track, album or artist to select more, then add them all to the queue, to the favourites or to a playlist, or remove them from a playlist.
 - **Delete tracks** from the card, after asking (turn it on in the settings first).
-- **Playlists** - create, rename, reorder and delete. You can back them up to the card as `.m3u` files that other players can read, and import `.m3u` playlists back, even when some files were moved.
+- **Playlists** - create, rename, reorder and delete. You can back them up to the card as `.m3u` files that other players can read, and import `.m3u` playlists back, even when some files were moved. The import screen can select all playlists on the card at once and replace the ones already on the player.
 
 ## Playback
 
