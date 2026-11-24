@@ -7,12 +7,14 @@
 
 // The microSD card's own page, under Settings > System: how full it is, what
 // it is formatted as, whether it was taken out without being unmounted, a
-// short speed test, and formatting it.
+// check of its filesystem, a short speed test, and formatting it.
 //
-// What the page does not offer, and why: checking and repairing a filesystem
-// (the device has no tool for it, and one needs more memory than the player
-// has for any card of a usual size), and trimming (the card driver takes no
-// discard requests). For both the page points at a computer.
+// The check is the player's own and does one repair: it frees the space of
+// clusters no file owns (system/device/fatcheck.h). The usual tools do more
+// and are not here because they need more memory than the player has for a
+// card of any usual size; for what the check finds and cannot repair the page
+// points at a computer. Trimming is not offered either: the card driver takes
+// no discard requests.
 extern lv_obj_t *cardpage_screen;
 
 void cardpage_init(gui_config_t *cfg);

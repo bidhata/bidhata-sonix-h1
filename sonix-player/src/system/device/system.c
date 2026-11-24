@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "src/system/core/config.h"
+#include "src/system/device/fatcheck.h"
 #include "src/gui/nowplaying/cover.h"
 #include "src/gui/settings/screensaver.h"
 #include "src/gui/shell/gui.h"
@@ -1431,6 +1432,172 @@ storage_format_result_t storage_format_card(void) {
 	}
 	printf("storage: %s formatted as FAT32 and mounted on %s\n", device, sd_root);
 	return STORAGE_FORMAT_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Checking the card
+//
+// The same letting go and taking back as for a format, with fatcheck.c in the
+// middle instead of mkdosfs. The card has to be unmounted for it: a mounted
+// filesystem keeps changes in memory that the card does not hold yet, and a
+// reader of the bare card would take a file being written for lost clusters.
+// ---------------------------------------------------------------------------
+
+bool storage_check_supported(void) {
+	return g_storage_cfg && g_storage_cfg->manage_mount && !getenv("SONIX_NO_MOUNT") && card_fs == CARD_FS_FAT32;
+}
+
+// Counts the files and the folders under `dir`, through the mounted
+// filesystem. It is what fatcheck's own reading of the card is held against
+// before anything is freed. False when any folder could not be read: a count
+// that may be short is no count.
+static bool count_tree(char *path, size_t path_size, int depth, long *files, long *folders) {
+	if (depth > 64) {
+		return false;
+	}
+	DIR *d = opendir(path);
+	if (!d) {
+		return false;
+	}
+	size_t len = strlen(path);
+	bool ok = true;
+	struct dirent *entry;
+	while (ok && (entry = readdir(d)) != NULL) {
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+		if ((size_t)snprintf(path + len, path_size - len, "/%s", entry->d_name) >= path_size - len) {
+			ok = false;
+			break;
+		}
+		bool is_dir = entry->d_type == DT_DIR;
+		if (entry->d_type == DT_UNKNOWN) {
+			struct stat st;
+			if (lstat(path, &st) != 0) {
+				ok = false;
+				break;
+			}
+			is_dir = S_ISDIR(st.st_mode);
+		}
+		if (is_dir) {
+			(*folders)++;
+			ok = count_tree(path, path_size, depth + 1, files, folders);
+		} else {
+			(*files)++;
+		}
+	}
+	path[len] = '\0';
+	closedir(d);
+	return ok;
+}
+
+storage_check_result_t storage_check_card(bool repair, uint64_t *lost_bytes) {
+	if (lost_bytes) {
+		*lost_bytes = 0;
+	}
+	if (!storage_check_supported()) {
+		return STORAGE_CHECK_UNSUPPORTED;
+	}
+
+	pthread_mutex_lock(&card_lock);
+
+	// The same flag as a format, and raised in the same order: see the note
+	// above storage_format_active().
+	format_active = true;
+	if (card_released || usb_storage_active() || !card_attached || !sd_root[0] || !is_mounted(sd_root) ||
+		!mount_is_alive(sd_root) || !sd_device_used[0]) {
+		format_active = false;
+		pthread_mutex_unlock(&card_lock);
+		return STORAGE_CHECK_NO_CARD;
+	}
+
+	char device[sizeof(sd_device_used)];
+	snprintf(device, sizeof(device), "%s", sd_device_used);
+	printf("storage: checking %s (mounted on %s)%s\n", device, sd_root, repair ? ", freeing lost clusters" : "");
+
+	card_databases_detach();   // playback, the log, the library and audiobook databases
+	cover_set_cache_dir(NULL); // the thumbnail cache moves to /tmp
+	radio_store_close();
+	sync();
+
+	// Counted now, with everything of the player's closed and nothing left to
+	// make or remove a file, and before the unmount takes the tree away.
+	long files = 0, folders = 0;
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s", sd_root);
+	bool counted = count_tree(path, sizeof(path), 0, &files, &folders);
+
+	if (umount(sd_root) != 0) {
+		int busy = errno;
+		card_databases_attach(sd_root); // the log first of all, so that this is in it
+		fprintf(stderr, "storage: the card is in use (%s); not checked\n", strerror(busy));
+		log_open_on_card();
+		format_active = false;
+		pthread_mutex_unlock(&card_lock);
+		return STORAGE_CHECK_BUSY;
+	}
+
+	// Without a count nothing is freed: the check still runs and says what it
+	// found.
+	fatcheck_result_t found;
+	bool ran = fatcheck_run(device, repair && counted, counted ? files : -1, counted ? folders : -1, &found);
+
+	// A card found whole, or made whole, is no longer one that "was not
+	// removed safely": the mark asks for exactly this check.
+	bool whole = ran && (found.status == FATCHECK_CLEAN || (found.status == FATCHECK_LOST && found.repaired));
+	if (whole && card_unclean == 1) {
+		unsigned char boot[512];
+		int fd = open(device, O_RDONLY | O_CLOEXEC);
+		bool got = fd >= 0 && read(fd, boot, sizeof(boot)) == (ssize_t)sizeof(boot);
+		if (fd >= 0) {
+			close(fd);
+		}
+		if (got) {
+			fat_lower_flag(device, true, boot);
+		}
+	}
+	sync();
+
+	bool mounted = false;
+	for (int attempt = 0; attempt < 10 && !mounted; attempt++) {
+		if (attempt) {
+			usleep(300 * 1000);
+		}
+		mounted = mount_sd(g_storage_cfg, g_runtime) == 0 && is_mounted(sd_root) && mount_is_alive(sd_root);
+	}
+	if (mounted) {
+		card_databases_attach(sd_root);
+	}
+	// Not mounted: the supervisor finds the card detached and keeps trying.
+
+	format_active = false;
+	pthread_mutex_unlock(&card_lock);
+
+	// Into the log now that it is back on the card.
+	printf("storage: check of %s: %u files in %u folders (the card showed %ld in %ld), %u lost clusters (%llu bytes)%s%s%s\n", device, (unsigned)found.files, (unsigned)found.folders, counted ? files : -1L, counted ? folders : -1L, (unsigned)found.lost_clusters, (unsigned long long)found.lost_bytes, found.repaired ? ", freed" : "", found.problem[0] ? " -- " : "", found.problem);
+	if (lost_bytes) {
+		*lost_bytes = found.lost_bytes;
+	}
+	if (!mounted) {
+		fprintf(stderr, "storage: %s was checked but would not mount again\n", device);
+		return STORAGE_CHECK_NOT_MOUNTED;
+	}
+	switch (found.status) {
+	case FATCHECK_CLEAN:
+		return STORAGE_CHECK_CLEAN;
+	case FATCHECK_LOST:
+		return found.repaired ? STORAGE_CHECK_REPAIRED : STORAGE_CHECK_LOST;
+	case FATCHECK_DAMAGED:
+		return STORAGE_CHECK_DAMAGED;
+	case FATCHECK_UNSUPPORTED:
+		return STORAGE_CHECK_UNSUPPORTED;
+	case FATCHECK_MISMATCH:
+		// The two readings of the tree did not agree, so which clusters are
+		// nobody's is not known for sure: a computer's job, like the rest.
+		return STORAGE_CHECK_DAMAGED;
+	default:
+		return STORAGE_CHECK_FAILED;
+	}
 }
 
 bool storage_card_fstype(char *out, size_t out_size) {

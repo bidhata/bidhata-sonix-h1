@@ -56,3 +56,11 @@ cc -fsyntax-only -I. -D_FILE_OFFSET_BITS=64 -DHOST_BUILD=1 \
    src/system/library/library.c
 cc -fsyntax-only -I. -D_FILE_OFFSET_BITS=64 -DHOST_BUILD=1 \
    src/system/playback/playlist.c
+
+# Task 5: the card checker, against FAT32 images made on the spot. Needs
+# dosfstools and mtools, so it is skipped where they are not installed.
+if command -v mkfs.fat > /dev/null && command -v mcopy > /dev/null; then
+	sh tests/fatcheck_test.sh
+else
+	echo "fatcheck: skipped (mkfs.fat or mtools not installed)"
+fi

@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef struct {
 	// Preferred block device, e.g. "/dev/mmcblk0p1". May be NULL: the player
@@ -132,9 +133,33 @@ bool storage_format_supported(void);
 // thread. Any thread otherwise.
 storage_format_result_t storage_format_card(void);
 
-// True while storage_format_card() has the card. The USB watcher does not
-// offer the card to a computer meanwhile.
+// True while storage_format_card() or storage_check_card() has the card. The
+// USB watcher does not offer the card to a computer meanwhile.
 bool storage_format_active(void);
+
+// Checking the card's filesystem, and giving back the space of clusters no
+// file owns (see fatcheck.h for what that is and is not). FAT32 only.
+typedef enum {
+	STORAGE_CHECK_CLEAN,	   // nothing wrong; a "not removed safely" mark is taken off
+	STORAGE_CHECK_LOST,		   // lost clusters, not freed: a check that was not asked to repair
+	STORAGE_CHECK_REPAIRED,	   // lost clusters, freed
+	STORAGE_CHECK_DAMAGED,	   // something only a computer can put right; nothing was changed
+	STORAGE_CHECK_UNSUPPORTED, // not FAT32, or a card this player does not mount itself (the simulator)
+	STORAGE_CHECK_NO_CARD,	   // no card, or it is with a computer over USB
+	STORAGE_CHECK_BUSY,		   // something has a file open on it; nothing was looked at
+	STORAGE_CHECK_FAILED,	   // the card could not be read or written
+	STORAGE_CHECK_NOT_MOUNTED, // checked, but it would not mount afterwards
+} storage_check_result_t;
+
+bool storage_check_supported(void);
+
+// Checks the card, and with `repair` frees its lost clusters when they are
+// all that is wrong. Stops playback, closes everything the player keeps on
+// the card, unmounts it, reads it, mounts it and opens everything again.
+// `lost_bytes`, when given, takes how much space the lost clusters hold.
+// Blocks for as long as that takes (seconds, more on a full card): never on
+// the UI thread. Any thread otherwise.
+storage_check_result_t storage_check_card(bool repair, uint64_t *lost_bytes);
 
 // Reopens whichever of the card's databases -- music, audiobooks, radio,
 // podcasts, thumbnails -- was deleted or replaced since it was opened. Called

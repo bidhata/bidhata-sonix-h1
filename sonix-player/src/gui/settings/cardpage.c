@@ -27,6 +27,7 @@ lv_obj_t *cardpage_screen;
 static lv_obj_t *used_value, *free_value, *fs_value, *state_value;
 static lv_obj_t *unclean_note;
 static lv_obj_t *speed_note; // what the test does, then what it found
+static lv_obj_t *check_row, *check_note; // what the check does, then what it found
 static lv_obj_t *format_row, *format_note;
 
 // A test or a format is running on its own thread. Both rows wait for it: the
@@ -38,6 +39,10 @@ static bool working;
 // when the test did not give any. Empty before the first test.
 static char speed_text[96];
 static bool speed_text_is_key;
+// The same for the check: what it last found, until something is done to the
+// card again.
+static char check_text[200];
+static bool check_text_is_key;
 
 // ---------------------------------------------------------------------------
 // what the page says
@@ -91,13 +96,23 @@ static void refresh(void) {
 							: unclean			   ? "cardpage_state_unclean"
 												   : "cardpage_state_ok";
 		lv_label_set_text(state_value, tr(state));
+		// Where the card can be checked here, the note says so instead of
+		// sending its reader to a computer.
+		lv_label_set_text(unclean_note, tr(storage_check_supported() ? "cardpage_unclean_note_check" : "cardpage_unclean_note"));
 		lv_obj_set_hidden(unclean_note, !unclean);
 	}
+
+	// Only for a card the check can read, so the row comes and goes with the
+	// card that is in.
+	bool can_check = present && storage_check_supported();
+	lv_obj_set_hidden(check_row, !can_check);
+	lv_obj_set_hidden(check_note, !can_check);
 
 	if (working) {
 		return; // the row that is working says so itself
 	}
 	lv_label_set_text(speed_note, !speed_text[0] ? tr("cardpage_speed_note") : speed_text_is_key ? tr(speed_text) : speed_text);
+	lv_label_set_text(check_note, !check_text[0] ? tr("cardpage_check_note") : check_text_is_key ? tr(check_text) : check_text);
 }
 
 static void loaded_cb(lv_event_t *e) {
@@ -175,6 +190,126 @@ static void speed_clicked_cb(lv_event_t *e) {
 }
 
 // ---------------------------------------------------------------------------
+// checking
+//
+// Two steps. The first only reads the card and says what it found. When that
+// is lost clusters and nothing else, it asks before the second, which frees
+// them. The second does not take the first's word for anything: it reads the
+// whole card again before it writes (storage_check_card).
+// ---------------------------------------------------------------------------
+
+typedef struct {
+	bool repair;
+	storage_check_result_t result;
+	uint64_t lost_bytes;
+} check_job_t;
+
+static void check_start(bool repair);
+
+static void repair_confirmed(void *user) {
+	(void)user;
+	// The same bar as a format: a table half written when the battery gives
+	// out is worse than the lost clusters were.
+	if (!fwupdate_battery_ok()) {
+		gui_notify_popup("system_battery_warning");
+		return;
+	}
+	check_start(true);
+}
+
+static void check_done_cb(void *user) {
+	check_job_t *job = user;
+	working = false;
+	check_text_is_key = true;
+	char size[32];
+	sysinfo_format_size(job->lost_bytes, size, sizeof(size));
+	bool ask = false;
+
+	switch (job->result) {
+	case STORAGE_CHECK_CLEAN:
+		snprintf(check_text, sizeof(check_text), "%s", "cardpage_check_clean");
+		break;
+	case STORAGE_CHECK_LOST:
+		snprintf(check_text, sizeof(check_text), tr("cardpage_check_lost"), size);
+		check_text_is_key = false;
+		ask = true;
+		break;
+	case STORAGE_CHECK_REPAIRED:
+		snprintf(check_text, sizeof(check_text), tr("cardpage_check_repaired"), size);
+		check_text_is_key = false;
+		break;
+	case STORAGE_CHECK_DAMAGED:
+		snprintf(check_text, sizeof(check_text), "%s", "cardpage_check_damaged");
+		break;
+	case STORAGE_CHECK_NO_CARD:
+		snprintf(check_text, sizeof(check_text), "%s", "system_no_card");
+		break;
+	case STORAGE_CHECK_BUSY:
+		snprintf(check_text, sizeof(check_text), "%s", "cardpage_format_busy");
+		break;
+	case STORAGE_CHECK_NOT_MOUNTED:
+		snprintf(check_text, sizeof(check_text), "%s", "cardpage_check_not_mounted");
+		break;
+	case STORAGE_CHECK_UNSUPPORTED:
+	case STORAGE_CHECK_FAILED:
+	default:
+		snprintf(check_text, sizeof(check_text), "%s", "cardpage_check_failed");
+		break;
+	}
+	free(job);
+	refresh();
+
+	if (ask) {
+		confirm_show("cardpage_check", "cardpage_check_lost_confirm", "cardpage_check_repair", repair_confirmed, NULL);
+	}
+}
+
+static void *check_thread(void *arg) {
+	check_job_t *job = arg;
+	job->result = storage_check_card(job->repair, &job->lost_bytes);
+	if (!gui_post(check_done_cb, job)) {
+		free(job); // the interface is gone; so is the page
+	}
+	return NULL;
+}
+
+static void check_start(bool repair) {
+	if (working) {
+		return;
+	}
+	check_job_t *job = calloc(1, sizeof(*job));
+	if (!job) {
+		return;
+	}
+	job->repair = repair;
+	working = true;
+	lv_label_set_text(check_note, tr("cardpage_checking"));
+
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, check_thread, job) != 0) {
+		free(job);
+		working = false;
+		snprintf(check_text, sizeof(check_text), "%s", "cardpage_check_failed");
+		check_text_is_key = true;
+		refresh();
+		return;
+	}
+	pthread_detach(thread);
+}
+
+static void check_clicked_cb(lv_event_t *e) {
+	(void)e;
+	if (working) {
+		return;
+	}
+	if (usb_storage_active() || !storage_card_usable()) {
+		confirm_notice("cardpage_check", usb_storage_active() ? "cardpage_state_computer" : "system_no_card");
+		return;
+	}
+	check_start(false);
+}
+
+// ---------------------------------------------------------------------------
 // formatting
 //
 // Two confirmations in a row, as for the factory reset and for the same
@@ -186,6 +321,7 @@ static void format_done_cb(void *user) {
 	storage_format_result_t result = (storage_format_result_t)(intptr_t)user;
 	working = false;
 	speed_text[0] = '\0'; // a figure for the card as it was
+	check_text[0] = '\0'; // and a finding
 	refresh();
 
 	const char *message = "cardpage_format_failed";
@@ -291,8 +427,11 @@ void cardpage_init(gui_config_t *cfg) {
 	unclean_note = note(container, "cardpage_unclean_note");
 	lv_obj_set_hidden(unclean_note, true);
 
-	// Actions: no chevron. The line under the test says what it does, and
-	// then what it found: two speeds do not fit beside the row's name.
+	// Actions: no chevron. The line under each says what it does, and then
+	// what it found: neither finding fits beside the row's name.
+	check_row = settingsrow_action(container, "cardpage_check", check_clicked_cb, NULL);
+	check_note = note(container, "cardpage_check_note");
+
 	settingsrow_action(container, "cardpage_speed_test", speed_clicked_cb, NULL);
 	speed_note = note(container, "cardpage_speed_note");
 
