@@ -146,6 +146,11 @@ bool firmware_update_start(void) {
 	// time would otherwise be whatever the RTC last knew.
 	clock_shutdown();
 
+	// Recovery will leave the card marked as not unmounted; the next start is
+	// told not to take that for a fault. Before the card is let go, since the
+	// note is decided by how the card was found when this run mounted it.
+	storage_note_update_handover();
+
 	// The recovery kernel reads the update off the card: it finds it clean.
 	storage_release_for_shutdown();
 	sync();

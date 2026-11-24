@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "src/system/core/config.h"
 #include "src/gui/nowplaying/cover.h"
 #include "src/gui/settings/screensaver.h"
 #include "src/gui/shell/gui.h"
@@ -670,15 +671,159 @@ bool storage_sd_writable(void) { return sd_writable; }
 // Whether the card was taken out, or lost its power, without being unmounted
 // the time before: 1 yes, 0 no, -1 not known. Read from the filesystem's own
 // flag BEFORE the card is mounted, because that is the only moment it says
-// anything: FAT and exFAT both raise the flag for as long as the card is
-// mounted and lower it on a clean unmount, so on a mounted card it is always
-// up. A card somebody else mounted is therefore "not known".
+// anything: the driver raises the flag for as long as the card is mounted, so
+// on a mounted card it is always up. A card somebody else mounted is therefore
+// "not known".
+//
+// On FAT the flag does not go away by itself. A card that is marked when it is
+// mounted is left marked when it is unmounted, however cleanly: the driver
+// takes the mark to mean "somebody should check this" and will not vouch for
+// the card. Only a check on a computer lowers it -- or this file, in the one
+// case below where it knows where the mark came from.
 static int card_unclean = -1;
+
+// Which filesystem the flag was read from, and the volume's serial number:
+// the two things needed to recognise the same card after a restart and to
+// know where on it the flag lives.
+typedef enum { CARD_FS_OTHER, CARD_FS_FAT16, CARD_FS_FAT32, CARD_FS_EXFAT } card_fs_t;
+static card_fs_t card_fs = CARD_FS_OTHER;
+static uint32_t card_serial;
+
+// Where each keeps its flag and its serial in the first sector.
+#define FAT16_STATE 0x25
+#define FAT16_SERIAL 39
+#define FAT32_STATE 0x41
+#define FAT32_SERIAL 67
+#define FAT_STATE_DIRTY 0x01
+#define EXFAT_FLAGS 106
+#define EXFAT_SERIAL 100
+#define EXFAT_FLAG_DIRTY 0x02
+// FAT32 keeps a spare copy of its first sector; the number of the sector it is
+// in sits here, and it lies among the reserved sectors counted at 14.
+#define FAT_BYTES_PER_SECTOR 11
+#define FAT_RESERVED_SECTORS 14
+#define FAT32_BACKUP_SECTOR 50
+
+static uint32_t le32_at(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static unsigned le16_at(const unsigned char *p) { return (unsigned)p[0] | (unsigned)p[1] << 8; }
+
+// ---------------------------------------------------------------------------
+// The mark a firmware update leaves
+//
+// An update goes like this: the player unmounts the card, the recovery system
+// mounts it to read the image, flashes, and restarts without unmounting. The
+// card was only read, but the driver raised its flag at the mount and nobody
+// lowered it, and on FAT it then stays up for good (see above). Left alone,
+// every player would say "not removed safely" from its first update on, about
+// a card nothing happened to.
+//
+// So the update leaves a note in the configuration when the card it hands over
+// was clean when this run mounted it: the card's serial number. At the next
+// start the note is taken out at once, and if the first card read is that same
+// card and is marked, the mark is the update's own and is lowered on the card
+// itself, before the mount, so that the card is clean again for real and the
+// next mark on it means something.
+//
+// Any other mark is left exactly as it is found: a card that was already
+// marked before the update, another card, a card whose serial cannot be read.
+// ---------------------------------------------------------------------------
+
+#define HANDOVER_SECTION "storage"
+#define HANDOVER_KEY "update_handover"
+
+// Set from the note at startup, used up by the first card whose flag can be read.
+static bool handover_pending;
+static uint32_t handover_serial;
 
 int storage_card_unclean(void) { return card_unclean; }
 
+void storage_note_update_handover(void) {
+	// Only a card known to have been clean, and one that can be told from
+	// another afterwards.
+	if (card_unclean != 0 || card_fs == CARD_FS_OTHER) {
+		return;
+	}
+	char serial[16];
+	snprintf(serial, sizeof(serial), "%08lx", (unsigned long)card_serial);
+	config_set(HANDOVER_SECTION, HANDOVER_KEY, serial);
+	config_save();
+	printf("storage: card %s handed to the update clean\n", serial);
+}
+
+// The note speaks for one start only, so it is taken out of the configuration
+// before anything is done with it: a start that dies half way must not find it
+// again next time and forgive a mark it knows nothing about.
+static void take_update_handover_note(void) {
+	const char *note = config_get(HANDOVER_SECTION, HANDOVER_KEY, "");
+	if (!note || !note[0]) {
+		return;
+	}
+	char *end = NULL;
+	unsigned long serial = strtoul(note, &end, 16);
+	handover_pending = end && end != note && *end == '\0';
+	handover_serial = (uint32_t)serial;
+	config_set(HANDOVER_SECTION, HANDOVER_KEY, "");
+	config_save();
+}
+
+// Lowers the flag in one copy of a FAT first sector, at `offset` on the card.
+// The sector is read again here and every condition looked at again, rather
+// than trusting what was read a moment ago: this is the only place the player
+// writes to a card below the filesystem, and it writes nothing it has not
+// just seen to be what it expects.
+static bool fat_lower_flag_at(int fd, off_t offset, bool fat32) {
+	unsigned char sector[512];
+	if (pread(fd, sector, sizeof(sector), offset) != (ssize_t)sizeof(sector)) {
+		return false;
+	}
+	if (sector[510] != 0x55 || sector[511] != 0xAA) {
+		return false;
+	}
+	if (fat32 ? memcmp(sector + 82, "FAT32", 5) != 0 : memcmp(sector + 54, "FAT1", 4) != 0) {
+		return false;
+	}
+	int state = fat32 ? FAT32_STATE : FAT16_STATE;
+	if (!(sector[state] & FAT_STATE_DIRTY)) {
+		return true; // already down
+	}
+	// That one bit and nothing else: the bit beside it records read errors
+	// the driver met, and those are not the update's to forgive.
+	sector[state] &= (unsigned char)~FAT_STATE_DIRTY;
+	return pwrite(fd, sector, sizeof(sector), offset) == (ssize_t)sizeof(sector);
+}
+
+// Lowers the flag on a FAT card that is not mounted. On FAT32 the spare copy
+// of the first sector is brought into line too, when it is where the first
+// sector says it is: a checker that compares the two would otherwise find them
+// different.
+static bool fat_lower_flag(const char *device, bool fat32, const unsigned char *boot) {
+	int fd = open(device, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "storage: cannot open %s to lower its flag: %s\n", device, strerror(errno));
+		return false;
+	}
+	bool ok = fat_lower_flag_at(fd, 0, fat32);
+	if (ok && fat32) {
+		unsigned sector_bytes = le16_at(boot + FAT_BYTES_PER_SECTOR);
+		unsigned spare = le16_at(boot + FAT32_BACKUP_SECTOR);
+		bool sane_size = sector_bytes == 512 || sector_bytes == 1024 || sector_bytes == 2048 || sector_bytes == 4096;
+		if (sane_size && spare > 0 && spare < le16_at(boot + FAT_RESERVED_SECTORS)) {
+			// A spare that will not take it is no reason to call the whole
+			// thing failed: the first sector is the one the driver reads.
+			fat_lower_flag_at(fd, (off_t)spare * (off_t)sector_bytes, true);
+		}
+	}
+	if (ok && fsync(fd) != 0) {
+		ok = false;
+	}
+	close(fd);
+	return ok;
+}
+
 void storage_probe_unclean(const char *device) {
 	card_unclean = -1;
+	card_fs = CARD_FS_OTHER;
+	card_serial = 0;
 	if (!device || !device[0]) {
 		return;
 	}
@@ -694,14 +839,42 @@ void storage_probe_unclean(const char *device) {
 		return;
 	}
 	if (memcmp(boot + 3, "EXFAT   ", 8) == 0) {
-		// VolumeFlags, two bytes at 106, low byte first; bit 1 is VolumeDirty.
-		card_unclean = (boot[106] & 0x02) ? 1 : 0;
+		card_fs = CARD_FS_EXFAT;
+		card_serial = le32_at(boot + EXFAT_SERIAL);
+		card_unclean = (boot[EXFAT_FLAGS] & EXFAT_FLAG_DIRTY) ? 1 : 0;
 	} else if (memcmp(boot + 82, "FAT32", 5) == 0) {
-		// FAT32 keeps the flag in the byte at 0x41, bit 0.
-		card_unclean = (boot[0x41] & 0x01) ? 1 : 0;
+		card_fs = CARD_FS_FAT32;
+		card_serial = le32_at(boot + FAT32_SERIAL);
+		card_unclean = (boot[FAT32_STATE] & FAT_STATE_DIRTY) ? 1 : 0;
 	} else if (memcmp(boot + 54, "FAT1", 4) == 0) {
-		// FAT12 and FAT16, in the byte at 0x25.
-		card_unclean = (boot[0x25] & 0x01) ? 1 : 0;
+		card_fs = CARD_FS_FAT16; // FAT12 too: same place, same meaning
+		card_serial = le32_at(boot + FAT16_SERIAL);
+		card_unclean = (boot[FAT16_STATE] & FAT_STATE_DIRTY) ? 1 : 0;
+	}
+	if (card_unclean < 0) {
+		return;
+	}
+
+	// The first card whose flag can be read uses the note up, whether it is
+	// the card the note is about or not.
+	if (handover_pending) {
+		handover_pending = false;
+		if (card_unclean == 1 && card_serial == handover_serial) {
+			if (card_fs == CARD_FS_EXFAT) {
+				// exFAT lowers its own flag at the next clean unmount, so
+				// there is nothing to write: the mark is just not reported.
+				printf("storage: %s is marked by the firmware update just done; not a fault\n", device);
+				card_unclean = 0;
+			} else if (fat_lower_flag(device, card_fs == CARD_FS_FAT32, boot)) {
+				printf("storage: %s was marked by the firmware update just done; the mark is lowered\n", device);
+				card_unclean = 0;
+			} else {
+				// It stays on the card, and will be reported from the next
+				// start on; this once it is still known not to be a fault.
+				fprintf(stderr, "storage: %s is marked by the firmware update and the mark would not come off\n", device);
+				card_unclean = 0;
+			}
+		}
 	}
 	if (card_unclean == 1) {
 		printf("storage: %s was not unmounted cleanly the last time\n", device);
@@ -2846,6 +3019,8 @@ void system_start_services(system_config_t *cfg, system_notification_cb_t notifi
 
 	g_storage_cfg = cfg->storage_cfg;
 	g_runtime = &runtime;
+
+	take_update_handover_note(); // before the first mount reads the card's flag
 
 	check_and_mount_existing_sd(cfg->storage_cfg, &runtime); // mount sd on startup, if it's present
 

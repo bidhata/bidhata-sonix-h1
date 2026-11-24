@@ -86,16 +86,27 @@ bool storage_card_attached(void);
 // there then lands on the internal flash.
 bool storage_card_usable(void);
 
-// Whether the card was not unmounted cleanly the time before this mount: 1
-// yes, 0 no, -1 not known (no card, a filesystem that keeps no such flag, or a
-// card this player did not mount itself). Decided before each mount, which is
-// the only moment the flag on the card says anything.
+// Whether the card was not unmounted cleanly at some time before this mount:
+// 1 yes, 0 no, -1 not known (no card, a filesystem that keeps no such flag, or
+// a card this player did not mount itself). Decided before each mount, which
+// is the only moment the flag on the card says anything. On FAT a mark stays
+// until the card is checked on a computer, so "the time before" can be long
+// ago.
 int storage_card_unclean(void);
 
 // Reads that flag from `device`, which must not be mounted. mount_sd() does it
 // by itself; this is for the one other place that mounts the card, the USB
 // export handing it back (usb.c).
 void storage_probe_unclean(const char *device);
+
+// Called by the firmware update just before it hands the card to the recovery
+// system. Recovery reads the image off the card and restarts without
+// unmounting it, which leaves the card marked as not unmounted, and on FAT
+// that mark never goes away by itself. When the card was clean as this run
+// mounted it, its serial number is noted in the configuration, and at the next
+// start the mark on that same card is lowered on the card before it is
+// mounted. Writes the configuration.
+void storage_note_update_handover(void);
 
 // The filesystem the card is mounted as, the kernel's name for it ("vfat",
 // "exfat", "fuseblk" for ntfs-3g). False, with an empty string, when nothing
