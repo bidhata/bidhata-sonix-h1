@@ -27,7 +27,7 @@ every format, real streaming, video, a VU meter that moves with the music, and n
 <div align="center">
 <img src="docs/screenshots/home.png" width="19%" alt="Home">
 <img src="docs/screenshots/music.png" width="19%" alt="Music library">
-<img src="docs/screenshots/meter-dials.png" width="19%" alt="Now Playing with VU dials">
+<img src="docs/screenshots/meter-bars.png" width="19%" alt="Now Playing with the level bars">
 <img src="docs/screenshots/meter-spectrum.png" width="19%" alt="Now Playing with the spectrum">
 <img src="docs/screenshots/more.png" width="19%" alt="More: games, books, files and video">
 </div>
