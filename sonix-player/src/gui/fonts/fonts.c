@@ -76,6 +76,12 @@ static script_face_t scripts[] = {
 	{"Thai", FACE_FILES("thai"), FACE_FILES("thai-bold"), 0, NULL, NULL, false},
 	{"Arabic", FACE_FILES("arabic"), FACE_FILES("arabic-bold"), ARABIC_RAISE, NULL, NULL, false},
 	{"Hebrew", FACE_FILES("hebrew"), FACE_FILES("hebrew-bold"), 0, NULL, NULL, false},
+	// Hindi, and what else is written in the same letters (Marathi, Nepali).
+	// Noto Sans Devanagari. The letters are drawn one by one as they come in
+	// the text: nothing here joins two consonants into one sign or moves the
+	// short i in front of its consonant, as a proper layout of the script
+	// does. A title reads, without looking the way it is printed.
+	{"Devanagari", FACE_FILES("devanagari"), FACE_FILES("devanagari-bold"), 0, NULL, NULL, false},
 };
 
 #define SCRIPT_COUNT (sizeof(scripts) / sizeof(scripts[0]))

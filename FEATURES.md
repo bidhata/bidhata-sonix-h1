@@ -212,7 +212,7 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 ## System
 
 - **Date and time** - automatic over Wi-Fi (the time zone is found by itself) or set by hand, with 24-hour or AM/PM clock and daylight saving time.
-- **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Polski, Português BR, Čeština, Russian, Chinese and Japanese. Titles in Korean, Thai and Arabic are shown too.
+- **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Polski, Português BR, Čeština, Russian, Chinese and Japanese. Titles in Korean, Thai, Arabic and Hebrew are shown too, and so is Hindi (Devanagari), with its letters drawn one after another rather than joined as in print.
 - **Firmware update** - over the internet with the full list of changes, or from a `.upt` file on the card.
 - **About** - device, serial number, card space and version.
 - **SD card** - a page for the card itself (Settings > System > SD card): how full it is, what it is formatted as, and whether it was taken out without being unmounted the last time. A **speed test** writes a 16 MB file, reads it back and checks it. **Check card** (FAT32 cards) reads the whole filesystem and looks for what an unsafe removal leaves behind; space held by data that belongs to no file it can free, after asking, and anything worse it reports and leaves for a computer. **Format card** erases the card and formats it as FAT32, after asking twice; it refuses while a game, a book, a video or a download still has a file open. Repairing damaged files and formatting as exFAT are done on a computer.
