@@ -16,6 +16,7 @@ streaming-keys.key
 streaming-keys.bin
 
 sonix-player/audio-target
+sonix-player/video-target
 
 sonix-player/compile_commands.json
 sonix-player/rockbox-toolchain
@@ -26,6 +27,7 @@ sonix-player/wavpack-*
 sonix-player/opusfile-*
 sonix-player/libogg-*
 sonix-player/freetype-*
+sonix-player/ffmpeg-*
 
 sonix-player/opus-1.4.tar.gz
 sonix-player/opusfile-0.12.tar.gz

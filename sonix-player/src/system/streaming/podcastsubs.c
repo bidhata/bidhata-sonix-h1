@@ -1,6 +1,7 @@
 #include "podcastsubs.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +34,10 @@ static podcast_feed_t subs[PODCASTSUBS_MAX];
 static int subs_count;
 // Which file the list in memory was last read from or written to.
 static file_identity_t db_identity;
+// Around the list and its count: the GUI thread follows and unfollows, the
+// page's worker reads the list, and the card supervisor reloads it. save() and
+// load() are called with it held.
+static pthread_mutex_t subs_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static bool exec(sqlite3 *db, const char *sql) {
 	char *error = NULL;
@@ -267,10 +272,12 @@ static void import_legacy(void) {
 }
 
 void podcastsubs_set_root(const char *sd_root) {
+	pthread_mutex_lock(&subs_lock);
 	if (!sd_root || !*sd_root) {
 		db_path[0] = '\0';
 		legacy_path[0] = '\0';
 		subs_count = 0;
+		pthread_mutex_unlock(&subs_lock);
 		return;
 	}
 	// The same hidden folder as everything else: the podcast cache, the library,
@@ -282,10 +289,13 @@ void podcastsubs_set_root(const char *sd_root) {
 	snprintf(legacy_path, sizeof(legacy_path), "%.480s/podcast-subs.ini", dir);
 	load();
 	import_legacy();
+	pthread_mutex_unlock(&subs_lock);
 }
 
 void podcastsubs_reload_if_replaced(void) {
+	pthread_mutex_lock(&subs_lock);
 	if (!db_path[0] || !file_identity_changed(db_path, &db_identity)) {
+		pthread_mutex_unlock(&subs_lock);
 		return;
 	}
 	printf("podcastsubs: %s was deleted or replaced; reading it again\n", db_path);
@@ -298,26 +308,42 @@ void podcastsubs_reload_if_replaced(void) {
 		mkdir(dir, 0777);
 	}
 	load();
+	pthread_mutex_unlock(&subs_lock);
 }
 
-int podcastsubs_count(void) { return subs_count; }
+int podcastsubs_count(void) {
+	pthread_mutex_lock(&subs_lock);
+	int n = subs_count;
+	pthread_mutex_unlock(&subs_lock);
+	return n;
+}
 
 int podcastsubs_list(podcast_feed_t *out, int max) {
 	if (!out || max <= 0) {
 		return 0;
 	}
+	pthread_mutex_lock(&subs_lock);
 	int n = subs_count < max ? subs_count : max;
 	memcpy(out, subs, sizeof(*out) * (size_t)n);
+	pthread_mutex_unlock(&subs_lock);
 	return n;
 }
 
-bool podcastsubs_is_followed(long long feed_id) {
+// Called with subs_lock held.
+static bool is_followed_locked(long long feed_id) {
 	for (int i = 0; i < subs_count; i++) {
 		if (subs[i].id == feed_id) {
 			return true;
 		}
 	}
 	return false;
+}
+
+bool podcastsubs_is_followed(long long feed_id) {
+	pthread_mutex_lock(&subs_lock);
+	bool followed = is_followed_locked(feed_id);
+	pthread_mutex_unlock(&subs_lock);
+	return followed;
 }
 
 void podcastsubs_follow(const podcast_feed_t *given) {
@@ -333,6 +359,7 @@ void podcastsubs_follow(const podcast_feed_t *given) {
 	}
 	podcastrss_remember(copy.id, copy.url);
 	const podcast_feed_t *feed = &copy;
+	pthread_mutex_lock(&subs_lock);
 
 	// Already followed: refresh the stored entry (the title may have changed)
 	// and move it to the head, which is the order the list is read in. The
@@ -352,6 +379,7 @@ void podcastsubs_follow(const podcast_feed_t *given) {
 				subs[0].episode_count = episodes;
 			}
 			save();
+			pthread_mutex_unlock(&subs_lock);
 			return;
 		}
 	}
@@ -365,9 +393,11 @@ void podcastsubs_follow(const podcast_feed_t *given) {
 	subs[0] = *feed;
 	subs_count++;
 	save();
+	pthread_mutex_unlock(&subs_lock);
 }
 
 void podcastsubs_unfollow(long long feed_id) {
+	pthread_mutex_lock(&subs_lock);
 	for (int i = 0; i < subs_count; i++) {
 		if (subs[i].id != feed_id) {
 			continue;
@@ -380,8 +410,9 @@ void podcastsubs_unfollow(long long feed_id) {
 		memmove(&subs[i], &subs[i + 1], sizeof(subs[0]) * (size_t)(subs_count - i - 1));
 		subs_count--;
 		save();
-		return;
+		break;
 	}
+	pthread_mutex_unlock(&subs_lock);
 }
 
 int podcastsubs_follow_batch(const podcast_feed_t *feeds, int count) {
@@ -389,11 +420,12 @@ int podcastsubs_follow_batch(const podcast_feed_t *feeds, int count) {
 		return 0;
 	}
 	int added = 0;
+	pthread_mutex_lock(&subs_lock);
 	// In the order given, each ahead of the ones before it, as a row of single
 	// follows would leave them.
 	for (int k = 0; k < count && subs_count < PODCASTSUBS_MAX; k++) {
 		const podcast_feed_t *feed = &feeds[k];
-		if (feed->id <= 0 || podcastsubs_is_followed(feed->id)) {
+		if (feed->id <= 0 || is_followed_locked(feed->id)) {
 			continue;
 		}
 		podcastrss_remember(feed->id, feed->url);
@@ -405,16 +437,19 @@ int podcastsubs_follow_batch(const podcast_feed_t *feeds, int count) {
 	if (added > 0) {
 		save();
 	}
+	pthread_mutex_unlock(&subs_lock);
 	return added;
 }
 
 int podcastsubs_missing_urls(long long *ids_out, int max) {
 	int n = 0;
+	pthread_mutex_lock(&subs_lock);
 	for (int i = 0; i < subs_count && n < max; i++) {
 		if (!subs[i].url[0]) {
 			ids_out[n++] = subs[i].id;
 		}
 	}
+	pthread_mutex_unlock(&subs_lock);
 	return n;
 }
 
@@ -422,33 +457,37 @@ void podcastsubs_set_url(long long feed_id, const char *url) {
 	if (!url || !url[0]) {
 		return;
 	}
+	pthread_mutex_lock(&subs_lock);
 	for (int i = 0; i < subs_count; i++) {
 		if (subs[i].id == feed_id) {
 			if (strcmp(subs[i].url, url) != 0) {
 				snprintf(subs[i].url, sizeof(subs[i].url), "%s", url);
 				save();
 			}
-			return;
+			break;
 		}
 	}
+	pthread_mutex_unlock(&subs_lock);
 }
 
 bool podcastsubs_is_followed_url(const char *url) {
 	if (!url || !url[0]) {
 		return false;
 	}
-	for (int i = 0; i < subs_count; i++) {
-		if (subs[i].url[0] && strcmp(subs[i].url, url) == 0) {
-			return true;
-		}
+	bool found = false;
+	pthread_mutex_lock(&subs_lock);
+	for (int i = 0; i < subs_count && !found; i++) {
+		found = subs[i].url[0] && strcmp(subs[i].url, url) == 0;
 	}
-	return false;
+	pthread_mutex_unlock(&subs_lock);
+	return found;
 }
 
 void podcastsubs_update(const podcast_feed_t *feed) {
 	if (!feed || feed->id <= 0) {
 		return;
 	}
+	pthread_mutex_lock(&subs_lock);
 	for (int i = 0; i < subs_count; i++) {
 		if (subs[i].id != feed->id) {
 			continue;
@@ -473,17 +512,20 @@ void podcastsubs_update(const podcast_feed_t *feed) {
 		if (changed) {
 			save();
 		}
-		return;
+		break;
 	}
+	pthread_mutex_unlock(&subs_lock);
 }
 
 int podcastsubs_missing_details(long long *ids_out, int max) {
 	int n = 0;
+	pthread_mutex_lock(&subs_lock);
 	for (int i = 0; i < subs_count && n < max; i++) {
 		if (!subs[i].url[0] || subs[i].episode_count <= 0) {
 			ids_out[n++] = subs[i].id;
 		}
 	}
+	pthread_mutex_unlock(&subs_lock);
 	return n;
 }
 
@@ -514,11 +556,15 @@ bool podcastsubs_address(long long feed_id, char *out, size_t size) {
 		return false;
 	}
 	out[0] = '\0';
-	for (int i = 0; i < subs_count; i++) {
+	pthread_mutex_lock(&subs_lock);
+	for (int i = 0; i < subs_count && !out[0]; i++) {
 		if (subs[i].id == feed_id && subs[i].url[0]) {
 			snprintf(out, size, "%s", subs[i].url);
-			return true;
 		}
+	}
+	pthread_mutex_unlock(&subs_lock);
+	if (out[0]) {
+		return true;
 	}
 	if (!podcastrss_is_id(feed_id)) {
 		return false;

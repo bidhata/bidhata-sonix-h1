@@ -788,6 +788,15 @@ bool qobuzcache_start(long track_id, const char *url, const char *mime, int dura
 	// streamturn_abandon_all().
 	busy_acquire();
 
+	// Asked again now that the turn is here: another caller may have downloaded
+	// this very track during the wait, and opening the file for writing would
+	// truncate it under whoever is playing it.
+	if (qobuzcache_has(track_id, mime, out, size)) {
+		busy_release();
+		free(d);
+		return true;
+	}
+
 	// Take the generation AFTER the wait: a value read before it would be stale
 	// by the time the turn arrives, and a track change that happened during the
 	// wait would cancel this download the moment it starts.

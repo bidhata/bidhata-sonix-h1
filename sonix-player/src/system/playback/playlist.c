@@ -1486,25 +1486,34 @@ const char *playlist_card_root(void) { return card_root; }
 // on every track change.
 #define FOLDER_WALK_MAX 4096
 
-// By name, the way the browser lists them.
-static int name_cmp(const void *a, const void *b) { return strcasecmp((const char *)a, (const char *)b); }
-
-// The subdirectories of `dir`, by name, junk left out. Returns how many were
-// written; `out` holds bare names, not paths.
-static int subdirs_of(const char *dir, char (*out)[256], int max) {
+// The subdirectory of `dir` next to `ref` by name, the way the browser lists
+// them, junk left out: the first after it, or with `after` false the last
+// before it. With `ref` NULL, the first or the last of them all. One pass over
+// the directory with nothing held but the best name so far, so a folder of
+// thousands is read whole. `out` takes the bare name; false when there is none.
+static bool subdir_beside(const char *dir, const char *ref, bool after, char out[256]) {
 	DIR *d = opendir(dir);
 	if (!d) {
-		return 0;
+		return false;
 	}
 
-	int count = 0;
+	bool found = false;
 	struct dirent *de;
-	while (count < max && (de = readdir(d)) != NULL) {
-		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
-			continue;
-		}
+	while ((de = readdir(d)) != NULL) {
 		if (de->d_name[0] == '.' || playlist_is_junk_name(de->d_name)) {
 			continue;
+		}
+		if (ref) {
+			int c = strcasecmp(de->d_name, ref);
+			if (after ? c <= 0 : c >= 0) {
+				continue;
+			}
+		}
+		if (found) {
+			int c = strcasecmp(de->d_name, out);
+			if (after ? c >= 0 : c <= 0) {
+				continue;
+			}
 		}
 		char full[768];
 		if (snprintf(full, sizeof(full), "%s/%s", dir, de->d_name) >= (int)sizeof(full)) {
@@ -1514,13 +1523,11 @@ static int subdirs_of(const char *dir, char (*out)[256], int max) {
 		if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) {
 			continue;
 		}
-		snprintf(out[count], sizeof(out[0]), "%s", de->d_name);
-		count++;
+		snprintf(out, 256, "%s", de->d_name);
+		found = true;
 	}
 	closedir(d);
-
-	qsort(out, (size_t)count, sizeof(out[0]), name_cmp);
-	return count;
+	return found;
 }
 
 // Whether `dir` holds at least one track this player can open. Only the folder
@@ -1555,22 +1562,15 @@ static bool folder_has_tracks(const char *dir) {
 // folder's own files come after everything below it.
 static void descend_to_first(char *dir, size_t size) {
 	for (int depth = 0; depth < 16; depth++) {
-		char (*names)[256] = malloc(sizeof(*names) * 64);
-		if (!names) {
-			return;
-		}
-		int count = subdirs_of(dir, names, 64);
-		if (count == 0) {
-			free(names);
+		char first[256];
+		if (!subdir_beside(dir, NULL, true, first)) {
 			return;
 		}
 		size_t len = strlen(dir);
-		if (len + 1 + strlen(names[0]) >= size) {
-			free(names);
+		if (len + 1 + strlen(first) >= size) {
 			return;
 		}
-		snprintf(dir + len, size - len, "/%s", names[0]);
-		free(names);
+		snprintf(dir + len, size - len, "/%s", first);
 	}
 }
 
@@ -1590,26 +1590,13 @@ static bool walk_step(const char *root, const char *dir, char *out, size_t out_s
 	*slash = '\0';
 	const char *name = slash + 1;
 
-	char (*names)[256] = malloc(sizeof(*names) * 256);
-	if (!names) {
-		return false;
-	}
-	int count = subdirs_of(parent, names, 256);
-
-	int at = -1;
-	for (int i = 0; i < count; i++) {
-		if (strcmp(names[i], name) == 0) {
-			at = i;
-			break;
-		}
-	}
-
+	char next[256];
 	bool ok = true;
-	if (at >= 0 && at + 1 < count) {
+	if (subdir_beside(parent, name, true, next)) {
 		// The next sibling, entered at its own first stop. A name that does not
 		// fit would be a path pointing at the wrong folder, so it is refused
 		// rather than truncated -- and the walk carries on from the parent.
-		if (snprintf(out, out_size, "%s/%s", parent, names[at + 1]) >= (int)out_size) {
+		if (snprintf(out, out_size, "%s/%s", parent, next) >= (int)out_size) {
 			ok = false;
 		} else {
 			descend_to_first(out, out_size);
@@ -1619,7 +1606,6 @@ static bool walk_step(const char *root, const char *dir, char *out, size_t out_s
 		ok = snprintf(out, out_size, "%s", parent) < (int)out_size;
 	}
 
-	free(names);
 	if (!ok) {
 		return false;
 	}
@@ -1640,17 +1626,10 @@ static bool walk_step(const char *root, const char *dir, char *out, size_t out_s
 // False once there is nothing before `dir` at all, which is the first stop of
 // the whole card.
 static bool walk_step_back(const char *root, const char *dir, char *out, size_t out_size) {
-	char (*names)[256] = malloc(sizeof(*names) * 256);
-	if (!names) {
-		return false;
-	}
-
+	char beside[256];
 	bool ok = false;
-	int count = subdirs_of(dir, names, 256);
-	if (count > 0) {
-		ok = snprintf(out, out_size, "%s/%s", dir, names[count - 1]) < (int)out_size;
-		free(names);
-		return ok;
+	if (subdir_beside(dir, NULL, false, beside)) {
+		return snprintf(out, out_size, "%s/%s", dir, beside) < (int)out_size;
 	}
 
 	// Up the tree, looking for something before us.
@@ -1669,23 +1648,14 @@ static bool walk_step_back(const char *root, const char *dir, char *out, size_t 
 		*slash = '\0';
 		const char *name = slash + 1;
 
-		count = subdirs_of(parent, names, 256);
-		int index = -1;
-		for (int i = 0; i < count; i++) {
-			if (strcmp(names[i], name) == 0) {
-				index = i;
-				break;
-			}
-		}
-		if (index > 0) {
-			ok = snprintf(out, out_size, "%s/%s", parent, names[index - 1]) < (int)out_size;
+		if (subdir_beside(parent, name, false, beside)) {
+			ok = snprintf(out, out_size, "%s/%s", parent, beside) < (int)out_size;
 			break;
 		}
 		// The first of them: keep climbing.
 		snprintf(at, sizeof(at), "%s", parent);
 	}
 
-	free(names);
 	return ok;
 }
 

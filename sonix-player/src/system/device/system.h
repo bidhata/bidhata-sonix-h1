@@ -79,6 +79,12 @@ const char *storage_sd_device(void);
 // outlives the card that was pulled out.
 bool storage_card_attached(void);
 
+// Whether the card's root can be written to as the card right now: attached,
+// really mounted, and not handed to a computer over USB. storage_sd_root()
+// names the mount point even with nothing mounted on it, and a file written
+// there then lands on the internal flash.
+bool storage_card_usable(void);
+
 // Reopens whichever of the card's databases -- music, audiobooks, radio,
 // podcasts, thumbnails -- was deleted or replaced since it was opened. Called
 // after something on the device may have removed files: the file manager, the

@@ -53,6 +53,12 @@
 // the decoder from catching up with the download immediately.
 #define FETCH_PREBUFFER (512 * 1024)
 
+// The most one pushed track may weigh. The address comes from whoever is on the
+// network and may never end -- a radio stream pushed as a track -- so without a
+// ceiling the download runs until the card is full. Kept under what a `long`
+// holds on the player, where it is 32 bits: the byte count below is one.
+#define FETCH_MAX_BYTES (2000L * 1024 * 1024)
+
 // How often the current position goes to dmrd. The controller draws its
 // progress bar from it; once per second is what the stock firmware does.
 #define POSITION_EVERY_MS 1000
@@ -698,6 +704,11 @@ static void *fetch_thread(void *arg) {
 		}
 		if (n == 0) {
 			ok = true;
+			break;
+		}
+		if (done > FETCH_MAX_BYTES - n) {
+			fprintf(stderr, "dlna: more than %ld bytes and still coming; giving up on it\n", FETCH_MAX_BYTES);
+			set_error(tr("dlna_download_failed"));
 			break;
 		}
 		if (fwrite(buf, 1, (size_t)n, out) != (size_t)n) {

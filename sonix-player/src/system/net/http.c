@@ -851,6 +851,15 @@ bool http_request(const char *url, const http_req_t *req, char **out, size_t *ou
 			snprintf(current, sizeof(current), "%s%s", base, location);
 		} else {
 			snprintf(current, sizeof(current), "%s", location);
+			// The caller's headers are the caller's credentials (a bearer
+			// token, an application key). They were meant for the host that
+			// was asked, so they do not follow the request to another one,
+			// nor from https down to http.
+			url_t next;
+			if (hop_req.extra_headers && (!url_parse(current, &next) || strcasecmp(next.host, u.host) != 0 ||
+										  (u.secure && !next.secure))) {
+				hop_req.extra_headers = NULL;
+			}
 		}
 	}
 	return false;

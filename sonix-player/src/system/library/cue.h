@@ -30,7 +30,9 @@
 #define CUE_MAX_TRACKS 99
 
 typedef struct {
-	int number;			// the TRACK number as written
+	int number;			// its place among the sheet's tracks, from 1: what a
+						// virtual path carries after "?track="
+	int written;		// the TRACK number as the sheet wrote it
 	char title[160];
 	char performer[160];
 	uint64_t begin_ms;	// from INDEX 01 (INDEX 00 is the pre-gap: ignore it)

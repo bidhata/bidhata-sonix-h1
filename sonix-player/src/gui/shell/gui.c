@@ -1,5 +1,9 @@
 #include "gui.h"
 
+// lv_timer_t is opaque: there is a lv_timer_set_period() but no getter, and
+// gui_refresh_period_set() has to read the period before changing it.
+#include "lvgl/src/misc/lv_timer_private.h"
+
 #include <pthread.h>
 #include <stdint.h>
 #include <sys/eventfd.h>
@@ -40,6 +44,8 @@
 #include "src/gui/gearboy/gearboysettings.h"
 #include "src/gui/flappybird/flappybird.h"
 #include "src/gui/gearboy/gearboyplay.h"
+#include "src/gui/video/videopage.h"
+#include "src/gui/video/videoplay.h"
 #include "src/gui/shell/lowbattery.h"
 #include "src/gui/shell/main_menu.h"
 #include "src/gui/library/medialist.h"
@@ -330,7 +336,9 @@ static void popup_notify(const char *text, const lv_image_dsc_t *icon, lv_color_
 	// gui_post rather than lv_async_call: popups arrive from any thread
 	// (bluetooth, usb, Qobuz downloads), and lv_async_call from off the GUI
 	// thread corrupts the timer list. See gui_post.
-	gui_post(popup_async_cb, ev);
+	if (!gui_post(popup_async_cb, ev)) {
+		free(ev); // the queue was full: the notice is dropped and still owned here
+	}
 }
 
 void gui_notify_popup(const char *text) { popup_notify(text, NULL, lv_color_black()); }
@@ -500,6 +508,32 @@ static void modal_init(gui_config_t *cfg) {
 	lv_obj_set_hidden(modal_bar, true);
 }
 
+// --- the refresh period, for the pages that change it ---
+
+static uint32_t saved_refresh_ms;
+
+void gui_refresh_period_set(uint32_t ms) {
+	lv_display_t *disp = lv_display_get_default();
+	lv_timer_t *timer = disp ? lv_display_get_refr_timer(disp) : NULL;
+	if (!timer) {
+		return;
+	}
+	if (!saved_refresh_ms) {
+		saved_refresh_ms = timer->period;
+	}
+	lv_timer_set_period(timer, ms);
+}
+
+void gui_refresh_period_restore(void) {
+	lv_display_t *disp = lv_display_get_default();
+	lv_timer_t *timer = disp ? lv_display_get_refr_timer(disp) : NULL;
+	if (!timer || !saved_refresh_ms) {
+		return;
+	}
+	lv_timer_set_period(timer, saved_refresh_ms);
+	saved_refresh_ms = 0;
+}
+
 // --- notifications from the button threads ---
 
 static void key_async_cb(void *user_data) {
@@ -514,6 +548,10 @@ static void key_async_cb(void *user_data) {
 	}
 	// The same while the metronome holds the output.
 	if (metronomepage_key(key)) {
+		return;
+	}
+	// And while a video is on screen: the keys are its own.
+	if (videoplay_key(key)) {
 		return;
 	}
 
@@ -636,6 +674,8 @@ void gui_init(gui_config_t *cfg) {
 	imageview_screen = lv_obj_create(NULL);
 	gearboypage_screen = lv_obj_create(NULL);
 	gearboyplay_screen = lv_obj_create(NULL);
+	videopage_screen = lv_obj_create(NULL);
+	videoplay_screen = lv_obj_create(NULL);
 	flappybird_screen = lv_obj_create(NULL);
 	metronomepage_screen = lv_obj_create(NULL);
 
@@ -683,6 +723,8 @@ void gui_init(gui_config_t *cfg) {
 	gearboyplay_init(cfg);  // before the list: one of its rows leads here
 	gearboysettings_init(cfg); // before the page: its gear opens this
 	gearboypage_init(cfg);
+	videoplay_init(cfg); // before the list: its rows lead here
+	videopage_init(cfg);
 	flappybird_init(cfg);
 	metronomepage_init(cfg);
 	// before morepage: the books tile opens the shelf, and the shelf opens the
@@ -767,6 +809,7 @@ void gui_init(gui_config_t *cfg) {
 		btsettings_screen, btaudio_screen,	 airpodspage_screen, airplay_screen,   streaming_screen,
 		radiopage_screen,  radiolist_screen, radiosearch_screen,
 		dlna_screen,	   sonixlink_screen,	 morepage_screen,	  gearboypage_screen, metronomepage_screen,
+		videopage_screen,
 	};
 	for (size_t i = 0; i < sizeof(back_swipe_screens) / sizeof(back_swipe_screens[0]); i++) {
 		switcher_attach_back_gesture(back_swipe_screens[i]);

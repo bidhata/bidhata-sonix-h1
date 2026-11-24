@@ -97,6 +97,7 @@ HOST_CFLAGS = $(CFLAGS) -DHOST_BUILD=1 $(shell sdl2-config --cflags) $(shell pkg
 TARGET_CFLAGS = $(CFLAGS) -march=mips32r2 -mno-madd4 -mplt -ffunction-sections -fdata-sections \
 				-I$(LVGL_DIR)/src -I$(FREETYPE_PREFIX)/include/freetype2 \
 				-I$(AUDIO_PREFIX)/include -I$(AUDIO_PREFIX)/include/opus \
+				-DVIDEO_CORE=1 -I$(VIDEO_PREFIX)/include \
 				-include src/system/core/glibc_compat.h
 
 # How hard each target object is optimised, on top of TARGET_CFLAGS (the last
@@ -109,14 +110,15 @@ TARGET_CFLAGS = $(CFLAGS) -march=mips32r2 -mno-madd4 -mplt -ffunction-sections -
 # cache, smaller code is seldom slower code.
 #
 # The hot paths: the audio chain and its effects, the decoders, the Game Boy
-# core, and LVGL's software renderer and colour mixing. SQLite is at -O2, the
-# level it is normally built at.
+# core, the video player's colour conversion, and LVGL's software renderer and
+# colour mixing. SQLite is at -O2, the level it is normally built at.
 #
 # TARGET_OPT is per object: the default level everywhere, the hot one on the
 # objects matching TARGET_HOT_PATTERNS.
 TARGET_DEFAULT_OPT = -O2
 TARGET_HOT_OPT = -O3
 TARGET_HOT_PATTERNS = build_target/system/audio/% build_target/system/decode/% build_target/gb/% \
+					  build_target/system/video/% \
 					  build_target/lvgl/src/draw/sw/% build_target/lvgl/src/misc/lv_color%
 TARGET_OPT = $(TARGET_DEFAULT_OPT)
 $(TARGET_HOT_PATTERNS): TARGET_OPT = $(TARGET_HOT_OPT)
@@ -154,7 +156,7 @@ HOST_LDFLAGS = $(shell sdl2-config --libs) -lpthread -lm -ldl -lasound $(shell p
 			   $(shell pkg-config --libs opusfile wavpack)
 #
 # --gc-sections: the other half of -ffunction-sections (see TARGET_CFLAGS).
-TARGET_LDFLAGS = $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS) -lpthread -lm -ldl -lasound \
+TARGET_LDFLAGS = $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS) $(VIDEO_LIBS) -lpthread -lm -ldl -lasound \
 				 $(GB_LDFLAGS) -Wl,--gc-sections
 
 # FreeType for the target, built static: the rootfs has no libfreetype.so. The
@@ -164,6 +166,7 @@ FREETYPE_VER = 2.13.3
 FREETYPE_TARBALL = freetype-$(FREETYPE_VER).tar.xz
 FREETYPE_URL = https://download.savannah.gnu.org/releases/freetype/$(FREETYPE_TARBALL)
 FREETYPE_URL_MIRROR = https://downloads.sourceforge.net/project/freetype/freetype2/$(FREETYPE_VER)/$(FREETYPE_TARBALL)
+FREETYPE_SHA256 = 0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289
 FREETYPE_SRC = $(CURDIR)/freetype-$(FREETYPE_VER)
 FREETYPE_PREFIX = $(CURDIR)/freetype-target
 
@@ -182,6 +185,7 @@ OGG_VER = 1.3.5
 OGG_TARBALL = libogg-$(OGG_VER).tar.gz
 OGG_URL = https://downloads.xiph.org/releases/ogg/$(OGG_TARBALL)
 OGG_URL_MIRROR = https://ftp.osuosl.org/pub/xiph/releases/ogg/$(OGG_TARBALL)
+OGG_SHA256 = 0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664
 OGG_SRC = $(CURDIR)/libogg-$(OGG_VER)
 OGG_LIB = $(AUDIO_PREFIX)/lib/libogg.a
 
@@ -189,6 +193,7 @@ OPUS_VER = 1.4
 OPUS_TARBALL = opus-$(OPUS_VER).tar.gz
 OPUS_URL = https://downloads.xiph.org/releases/opus/$(OPUS_TARBALL)
 OPUS_URL_MIRROR = https://ftp.osuosl.org/pub/xiph/releases/opus/$(OPUS_TARBALL)
+OPUS_SHA256 = c9b32b4253be5ae63d1ff16eea06b94b5f0f2951b7a02aceef58e3a3ce49c51f
 OPUS_SRC = $(CURDIR)/opus-$(OPUS_VER)
 OPUS_LIB = $(AUDIO_PREFIX)/lib/libopus.a
 
@@ -196,6 +201,7 @@ OPUSFILE_VER = 0.12
 OPUSFILE_TARBALL = opusfile-$(OPUSFILE_VER).tar.gz
 OPUSFILE_URL = https://downloads.xiph.org/releases/opus/$(OPUSFILE_TARBALL)
 OPUSFILE_URL_MIRROR = https://ftp.osuosl.org/pub/xiph/releases/opus/$(OPUSFILE_TARBALL)
+OPUSFILE_SHA256 = 118d8601c12dd6a44f52423e68ca9083cc9f2bfe72da7a8c1acb22a80ae3550b
 OPUSFILE_SRC = $(CURDIR)/opusfile-$(OPUSFILE_VER)
 OPUSFILE_LIB = $(AUDIO_PREFIX)/lib/libopusfile.a
 
@@ -203,12 +209,43 @@ WAVPACK_VER = 5.6.0
 WAVPACK_TARBALL = wavpack-$(WAVPACK_VER).tar.bz2
 WAVPACK_URL = https://www.wavpack.com/$(WAVPACK_TARBALL)
 WAVPACK_URL_MIRROR = https://github.com/dbry/WavPack/releases/download/$(WAVPACK_VER)/$(WAVPACK_TARBALL)
+WAVPACK_SHA256 = 8cbfa15927d29bcf953db35c0cfca7424344ff43ebe4083daf161577fb839cc1
 WAVPACK_SRC = $(CURDIR)/wavpack-$(WAVPACK_VER)
 WAVPACK_LIB = $(AUDIO_PREFIX)/lib/libwavpack.a
 
 # The order matters: with static libraries the linker resolves left to right,
 # and opusfile calls opus which calls ogg.
 AUDIO_LIBS = $(OPUSFILE_LIB) $(OPUS_LIB) $(OGG_LIB) $(WAVPACK_LIB)
+
+# Video (src/system/video): FFmpeg, static like the rest, and cut down to what
+# this device can play -- see tools/video-probe for the measurements behind the
+# list. MPEG-4 is the codec files are converted to (tools/video-convert.sh);
+# H.264 is there for files small enough for it, MPEG-1/2 because they cost
+# almost nothing. The sound decoders are the fixed-point ones.
+#
+# The host build has video only when the system has the FFmpeg development
+# packages (libavformat-dev libavcodec-dev libavutil-dev); without them the
+# page is simply absent from the simulator.
+VIDEO_PREFIX = $(CURDIR)/video-target
+
+FFMPEG_VER = 9.0.2
+FFMPEG_TARBALL = ffmpeg-$(FFMPEG_VER).tar.xz
+FFMPEG_URL = https://ffmpeg.org/releases/$(FFMPEG_TARBALL)
+FFMPEG_SRC = $(CURDIR)/ffmpeg-$(FFMPEG_VER)
+FFMPEG_LIB = $(VIDEO_PREFIX)/lib/libavcodec.a
+
+FFMPEG_DECODERS = mpeg4 h264 mpeg2video mpeg1video aac_fixed mp3 mp2 ac3_fixed pcm_s16le
+FFMPEG_DEMUXERS = mov matroska avi mpegps
+FFMPEG_PARSERS = mpeg4video h264 mpegvideo aac mpegaudio ac3
+
+# The order matters, as above: avformat calls avcodec calls avutil.
+VIDEO_LIBS = $(VIDEO_PREFIX)/lib/libavformat.a $(VIDEO_PREFIX)/lib/libavcodec.a $(VIDEO_PREFIX)/lib/libavutil.a
+
+HOST_VIDEO := $(shell pkg-config --exists libavformat libavcodec libavutil 2>/dev/null && echo 1)
+ifeq ($(HOST_VIDEO),1)
+HOST_CFLAGS += -DVIDEO_CORE=1 $(shell pkg-config --cflags libavformat libavcodec libavutil)
+HOST_LDFLAGS += $(shell pkg-config --libs libavformat libavcodec libavutil)
+endif
 
 
 # Source files. src/gb holds a .c as well (the miniz shell) alongside the C++
@@ -347,10 +384,17 @@ DEVICE_GLIBC_MINOR = 22
 .PHONY: check-abi
 check-abi:
 	@if [ ! -x "$(CROSS_READELF)" ]; then \
-		echo "check-abi: $(CROSS_READELF) is not there, check skipped"; \
-		exit 0; \
+		echo "*** check-abi: $(CROSS_READELF) is not there, so '$(TARGET_BIN)' cannot be checked."; \
+		echo "*** Set CROSS_READELF to the readelf of the toolchain in use."; \
+		rm -f $(TARGET_BIN) $(TARGET_DEBUG_BIN); \
+		exit 1; \
 	fi; \
-	bad=$$($(CROSS_READELF) --dyn-syms -W $(TARGET_BIN) 2>/dev/null \
+	syms=$$($(CROSS_READELF) --dyn-syms -W $(TARGET_BIN)) || { \
+		echo "*** check-abi: $(CROSS_READELF) could not read '$(TARGET_BIN)'."; \
+		rm -f $(TARGET_BIN) $(TARGET_DEBUG_BIN); \
+		exit 1; \
+	}; \
+	bad=$$(echo "$$syms" \
 		| awk '{ for (i = 1; i <= NF; i++) if (match($$i, /@GLIBC_[0-9.]+$$/)) { \
 			ver = substr($$i, RSTART + 7); n = split(ver, v, "."); \
 			if (v[1] > $(DEVICE_GLIBC_MAJOR) || (v[1] == $(DEVICE_GLIBC_MAJOR) && v[2] > $(DEVICE_GLIBC_MINOR))) print "  " $$i; \
@@ -417,15 +461,37 @@ clean:
 .PHONY: libs-clean
 libs-clean:
 	rm -rf $(FREETYPE_PREFIX) $(AUDIO_PREFIX) $(FREETYPE_SRC) $(OGG_SRC) $(OPUS_SRC) $(OPUSFILE_SRC) $(WAVPACK_SRC)
+	rm -rf $(VIDEO_PREFIX) $(FFMPEG_SRC)
 
 # Make sure the cross compiler is built before trying to make any of the target
 # objects with it.
-$(TARGET_OBJS): $(CROSS_CC) $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS)
-$(TARGET_BIN): $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS)
+$(TARGET_OBJS): $(CROSS_CC) $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS) $(FFMPEG_LIB)
+$(TARGET_BIN): $(FREETYPE_PREFIX)/lib/libfreetype.a $(AUDIO_LIBS) $(FFMPEG_LIB)
 
 $(CROSS_CC):
 	@echo "Building Rockbox toolchain..."
 	./rockboxdev/rockboxdev.sh
+
+# rockboxdev.sh keeps this file in the toolchain directory from its start to
+# its successful end. The compiler is installed long before the end (GCC stage
+# 1, with no C library), so while the file is there the compiler being there
+# does not mean the toolchain is: the script runs again.
+ifneq ($(wildcard $(ROCKBOX_TOOLCHAIN_DIR)/.rbdev-incomplete),)
+$(CROSS_CC): FORCE
+endif
+
+# $(call fetch,TARBALL,URL,MIRROR,SHA256): downloads a tarball that is not
+# there yet. It is written as TARBALL.part and takes its name only once it is
+# whole and its sha256 is the pinned one, so a download that fails or is cut
+# short leaves nothing the next run would take for the tarball.
+define fetch
+	@if [ ! -f $(1) ]; then \
+		{ wget -O $(1).part $(2) || wget -O $(1).part $(3); } && \
+		sum=$$({ sha256sum $(1).part 2>/dev/null || shasum -a 256 $(1).part; } | cut -d' ' -f1) && \
+		{ [ "$$sum" = "$(4)" ] || { echo "$(1): sha256 is $$sum, not $(4)" >&2; exit 1; }; } && \
+		mv $(1).part $(1); \
+	fi
+endef
 
 # The flags FreeType and the audio libraries are built with. -march and -mplt as
 # in TARGET_CFLAGS: they are static, so they end up in the same executable. They
@@ -437,10 +503,7 @@ LIB_CFLAGS = -O2 -march=mips32r2 -mplt
 # ranlib/ar to be found under their host-triplet names.
 $(FREETYPE_PREFIX)/lib/libfreetype.a: $(CROSS_CC)
 	@echo "Building static FreeType $(FREETYPE_VER) for the target..."
-	@if [ ! -f $(FREETYPE_TARBALL) ]; then \
-		wget -O $(FREETYPE_TARBALL) $(FREETYPE_URL) || \
-		wget -O $(FREETYPE_TARBALL) $(FREETYPE_URL_MIRROR); \
-	fi
+	$(call fetch,$(FREETYPE_TARBALL),$(FREETYPE_URL),$(FREETYPE_URL_MIRROR),$(FREETYPE_SHA256))
 	rm -rf $(FREETYPE_SRC) && tar xf $(FREETYPE_TARBALL)
 	cd $(FREETYPE_SRC) && PATH="$(ROCKBOX_TOOLCHAIN_DIR)/bin:$$PATH" ./configure \
 		--host=mipsel-rockbox-linux-gnu \
@@ -468,9 +531,7 @@ CROSS_COMMON = --host=mipsel-rockbox-linux-gnu --prefix=$(AUDIO_PREFIX) --disabl
 
 $(OGG_LIB): $(CROSS_CC)
 	@echo "Building static libogg $(OGG_VER) for the target..."
-	@if [ ! -f $(OGG_TARBALL) ]; then \
-		wget -O $(OGG_TARBALL) $(OGG_URL) || wget -O $(OGG_TARBALL) $(OGG_URL_MIRROR); \
-	fi
+	$(call fetch,$(OGG_TARBALL),$(OGG_URL),$(OGG_URL_MIRROR),$(OGG_SHA256))
 	rm -rf $(OGG_SRC) && tar xf $(OGG_TARBALL)
 	cd $(OGG_SRC) && $(CROSS_PATH) ./configure $(CROSS_COMMON) $(CROSS_TOOLS)
 	$(CROSS_PATH) $(MAKE) -C $(OGG_SRC)
@@ -480,9 +541,7 @@ $(OGG_LIB): $(CROSS_CC)
 # API stays compiled in -- removing it would take --disable-float-api.
 $(OPUS_LIB): $(CROSS_CC)
 	@echo "Building static libopus $(OPUS_VER) for the target..."
-	@if [ ! -f $(OPUS_TARBALL) ]; then \
-		wget -O $(OPUS_TARBALL) $(OPUS_URL) || wget -O $(OPUS_TARBALL) $(OPUS_URL_MIRROR); \
-	fi
+	$(call fetch,$(OPUS_TARBALL),$(OPUS_URL),$(OPUS_URL_MIRROR),$(OPUS_SHA256))
 	rm -rf $(OPUS_SRC) && tar xf $(OPUS_TARBALL)
 	cd $(OPUS_SRC) && $(CROSS_PATH) ./configure $(CROSS_COMMON) \
 		--enable-fixed-point --disable-doc --disable-extra-programs \
@@ -496,9 +555,7 @@ $(OPUS_LIB): $(CROSS_CC)
 # pull in OpenSSL.
 $(OPUSFILE_LIB): $(CROSS_CC) $(OGG_LIB) $(OPUS_LIB)
 	@echo "Building static opusfile $(OPUSFILE_VER) for the target..."
-	@if [ ! -f $(OPUSFILE_TARBALL) ]; then \
-		wget -O $(OPUSFILE_TARBALL) $(OPUSFILE_URL) || wget -O $(OPUSFILE_TARBALL) $(OPUSFILE_URL_MIRROR); \
-	fi
+	$(call fetch,$(OPUSFILE_TARBALL),$(OPUSFILE_URL),$(OPUSFILE_URL_MIRROR),$(OPUSFILE_SHA256))
 	rm -rf $(OPUSFILE_SRC) && tar xf $(OPUSFILE_TARBALL)
 	cd $(OPUSFILE_SRC) && $(CROSS_PATH) ./configure $(CROSS_COMMON) \
 		--disable-http --disable-examples --disable-doc \
@@ -514,9 +571,7 @@ $(OPUSFILE_LIB): $(CROSS_CC) $(OGG_LIB) $(OPUS_LIB)
 # ships is for x86 and ARM.
 $(WAVPACK_LIB): $(CROSS_CC)
 	@echo "Building static libwavpack $(WAVPACK_VER) for the target..."
-	@if [ ! -f $(WAVPACK_TARBALL) ]; then \
-		wget -O $(WAVPACK_TARBALL) $(WAVPACK_URL) || wget -O $(WAVPACK_TARBALL) $(WAVPACK_URL_MIRROR); \
-	fi
+	$(call fetch,$(WAVPACK_TARBALL),$(WAVPACK_URL),$(WAVPACK_URL_MIRROR),$(WAVPACK_SHA256))
 	rm -rf $(WAVPACK_SRC) && tar xf $(WAVPACK_TARBALL)
 	cd $(WAVPACK_SRC) && $(CROSS_PATH) ./configure $(CROSS_COMMON) \
 		--disable-apps --disable-man --disable-asm \
@@ -524,6 +579,48 @@ $(WAVPACK_LIB): $(CROSS_CC)
 		$(CROSS_TOOLS)
 	$(CROSS_PATH) $(MAKE) -C $(WAVPACK_SRC)
 	$(CROSS_PATH) $(MAKE) -C $(WAVPACK_SRC) install
+
+# FFmpeg has its own configure, not autoconf's, so none of CROSS_COMMON applies.
+#
+# --disable-everything, then the lists above: the whole of FFmpeg is fifteen
+# megabytes of code and this is under two.
+#
+# Every MIPS extension is off. FFmpeg's assembly is for DSP, MSA and Loongson
+# cores, and the X1600 has none of them (/proc/cpuinfo lists no ASE at all), so
+# the decoders are plain C.
+#
+# -ffunction-sections -fdata-sections, as in TARGET_CFLAGS and for the same
+# reason: the player's code is locked into RAM, and --gc-sections can only
+# leave out what sits in a section of its own. Without them the binary grows by
+# 3.3 MB for video.
+#
+# -include glibc_compat.h: FFmpeg calls powf, expf and the rest, and the .a
+# ends up inside the player, where check-abi would refuse them. LIB_CFLAGS'
+# -march and -mplt come from --cpu and --extra-cflags; -mno-madd4 as in
+# TARGET_CFLAGS.
+$(FFMPEG_LIB): $(CROSS_CC)
+	@echo "Building static FFmpeg $(FFMPEG_VER) for the target..."
+	@if [ ! -f $(FFMPEG_TARBALL) ]; then \
+		wget -O $(FFMPEG_TARBALL) $(FFMPEG_URL); \
+	fi
+	rm -rf $(FFMPEG_SRC) && tar xf $(FFMPEG_TARBALL)
+	cd $(FFMPEG_SRC) && $(CROSS_PATH) ./configure \
+		--prefix=$(VIDEO_PREFIX) \
+		--enable-cross-compile --cross-prefix=mipsel-rockbox-linux-gnu- \
+		--arch=mipsel --target-os=linux --cpu=mips32r2 \
+		--extra-cflags="-mno-madd4 -mplt -ffunction-sections -fdata-sections -include $(CURDIR)/src/system/core/glibc_compat.h" \
+		--disable-mipsdsp --disable-mipsdspr2 --disable-msa --disable-mmi --disable-mipsfpu \
+		--disable-loongson2 --disable-loongson3 \
+		--enable-static --disable-shared --disable-pic \
+		--disable-everything --disable-autodetect --disable-programs --disable-doc \
+		--disable-network --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
+		--disable-debug \
+		--enable-protocol=file \
+		$(addprefix --enable-decoder=,$(FFMPEG_DECODERS)) \
+		$(addprefix --enable-demuxer=,$(FFMPEG_DEMUXERS)) \
+		$(addprefix --enable-parser=,$(FFMPEG_PARSERS))
+	$(CROSS_PATH) $(MAKE) -C $(FFMPEG_SRC)
+	$(CROSS_PATH) $(MAKE) -C $(FFMPEG_SRC) install
 
 # Header dependencies recorded by -MMD (see CFLAGS). The dashes keep make quiet
 # on the first build, when no .d files exist yet. The C++ objects end in .opp

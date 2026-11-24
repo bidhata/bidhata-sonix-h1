@@ -19,7 +19,13 @@
 #include "src/system/device/power.h"
 #include "src/system/device/sysinfo.h"
 #include "src/system/device/system.h"
+#include "src/system/device/usb.h"
+#include "src/gui/shell/gui.h"
 
+// Under this level, with no cable in, the update is not started: recovery
+// rewrites the kernel and the rootfs, and a cell that runs out half way leaves
+// neither.
+#define UPDATE_MIN_BATTERY_PERCENT 30
 
 // The card is scanned once and every name compared case-insensitively,
 // rather than guessing at spellings: FAT is case-insensitive but exFAT and
@@ -101,10 +107,22 @@ bool firmware_update_file_find(char *out, size_t out_size) {
 	return find_in_dir(root, name, out, out_size);
 }
 
-void firmware_update_start(void) {
+bool firmware_update_start(void) {
 #ifdef HOST_BUILD
 	printf("firmware: (host build) would arm recovery and reboot\n");
+	return true;
 #else
+	// A level read now, not the status bar's last one. No reading at all is
+	// not a refusal: a gauge that does not answer must not lock updates out.
+	sync_battery_from_sysfs();
+	const char *level = read_battery_percent();
+	if (level && level[0] >= '0' && level[0] <= '9' && atoi(level) < UPDATE_MIN_BATTERY_PERCENT &&
+		!usb_vbus_present()) {
+		printf("firmware: battery at %s%% and no cable in; the update is not started\n", level);
+		gui_notify_popup("system_battery_warning");
+		return false;
+	}
+
 	printf("firmware: arming recovery\n");
 
 	// The screen fades out the way the power key puts it out, first: what

@@ -1,9 +1,13 @@
 #include "qobuzpage.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <malloc.h>
+#include <unistd.h>
 
 #include "src/gui/shell/confirm.h"
 #include "src/gui/fonts/fonts.h"
@@ -112,6 +116,23 @@ static job_kind_t result_kind;
 static char result_error[256];
 static char result_title[160];
 
+// The first entry the job that just finished asked for, set whether it worked
+// or not: 0 is a list of its own, anything higher another page of the one on
+// screen. result_from only moves when the job worked.
+static int result_job_offset;
+
+// The result just delivered has not been read yet.
+//
+// The result_* buffers are a single slot, written by the worker and read by the
+// GUI inside the async, so the worker waits for the result to be taken before
+// picking up the next job: a second job would otherwise rewrite result_kind and
+// result_count under the first one's job_done_cb().
+//
+// The wait is bounded: a GUI that has stopped taking results must not hold the
+// worker for ever.
+static bool result_pending;
+static pthread_cond_t result_taken = PTHREAD_COND_INITIALIZER;
+
 // What the list is showing right now, so a row tap knows what to do.
 static job_kind_t list_kind;
 
@@ -192,6 +213,13 @@ static lv_obj_t *list_empty;
 static void rebuild_home(void);
 static void row_clicked_cb(lv_event_t *e);
 
+// The list history lives further down, but job_done_cb() decides what becomes
+// of the step a request took: it stays when the list arrived and is taken back
+// when it did not.
+static bool job_is_list(job_kind_t kind);
+static void list_nav_keep(void);
+static void list_nav_restore(void);
+
 // "3:42"
 static void duration_text(int seconds, char *out, size_t size) {
 	if (seconds <= 0) {
@@ -249,8 +277,15 @@ static row_menu_t row_menu_kind(job_kind_t kind) {
 	}
 }
 
-// The row the menu was opened on. Only one: the menu is modal.
-static int menu_index = -1;
+// What the menu was opened on. Only one: the menu is modal.
+//
+// The entry's own id and name, copied when the menu opens, and not its row
+// number: a question is still on screen when a reload started by an earlier
+// removal redraws the list, and the same row number then names another entry.
+static long menu_track_id;
+static char menu_album_id[40];
+static long menu_playlist_id;
+static char menu_name[QOBUZ_TITLE_MAX];
 
 static char sync_message[192];
 
@@ -301,77 +336,73 @@ static void row_added_done(bool ok, const char *error, void *user) {
 
 static void do_track_add(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (menu_track_id == 0) {
 		return;
 	}
-	long id = result_tracks[menu_index].id;
-	qobuzsync_favorite_toggle(id, true, row_added_done, NULL);
+	qobuzsync_favorite_toggle(menu_track_id, true, row_added_done, NULL);
 }
 
 static void do_track_remove(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (menu_track_id == 0) {
 		return;
 	}
-	qobuzsync_favorite_toggle(result_tracks[menu_index].id, false, row_sync_done, (void *)(intptr_t)1);
+	qobuzsync_favorite_toggle(menu_track_id, false, row_sync_done, (void *)(intptr_t)1);
 }
 
 static void do_album_add(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (!menu_album_id[0]) {
 		return;
 	}
-	qobuzsync_album_favorite(result_albums[menu_index].id_text, true, row_added_done, NULL);
+	qobuzsync_album_favorite(menu_album_id, true, row_added_done, NULL);
 }
 
 static void do_album_remove(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (!menu_album_id[0]) {
 		return;
 	}
-	qobuzsync_album_favorite(result_albums[menu_index].id_text, false, row_sync_done, (void *)(intptr_t)1);
+	qobuzsync_album_favorite(menu_album_id, false, row_sync_done, (void *)(intptr_t)1);
 }
 
 static void do_playlist_delete(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (menu_playlist_id == 0) {
 		return;
 	}
-	qobuzsync_playlist_remove(result_playlists[menu_index].id, row_sync_done, (void *)(intptr_t)1);
+	qobuzsync_playlist_remove(menu_playlist_id, row_sync_done, (void *)(intptr_t)1);
 }
 
 // The two destructive actions go through a confirmation: an accidental tap on
 // the ellipsis must not delete a playlist.
 static void ask_track_remove(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (menu_track_id == 0) {
 		return;
 	}
 	char message[QOBUZ_TITLE_MAX + 64];
-	snprintf(message, sizeof(message), tr("will_no_longer_be_one_of"),
-			 result_tracks[menu_index].title);
+	snprintf(message, sizeof(message), tr("will_no_longer_be_one_of"), menu_name);
 	confirm_show("remove_from_favourites_2", message, "remove", do_track_remove, NULL);
 }
 
 static void ask_album_remove(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (!menu_album_id[0]) {
 		return;
 	}
 	char message[QOBUZ_TITLE_MAX + 64];
-	snprintf(message, sizeof(message), tr("will_no_longer_be_one_of_2"),
-			 result_albums[menu_index].title);
+	snprintf(message, sizeof(message), tr("will_no_longer_be_one_of_2"), menu_name);
 	confirm_show("remove_from_favourites_2", message, "remove", do_album_remove, NULL);
 }
 
 static void ask_playlist_delete(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (menu_playlist_id == 0) {
 		return;
 	}
 	char message[QOBUZ_TITLE_MAX + 64];
-	snprintf(message, sizeof(message), tr("qobuz_will_be_deleted_from_your_qobuz"),
-			 result_playlists[menu_index].name);
+	snprintf(message, sizeof(message), tr("qobuz_will_be_deleted_from_your_qobuz"), menu_name);
 	confirm_show("delete_the_playlist", message, "delete", do_playlist_delete, NULL);
 }
 
@@ -385,7 +416,28 @@ static void row_menu_cb(lv_event_t *e) {
 	if (index < 0 || index >= result_count) {
 		return;
 	}
-	menu_index = index;
+	menu_track_id = 0;
+	menu_album_id[0] = '\0';
+	menu_playlist_id = 0;
+	menu_name[0] = '\0';
+	switch (row_menu_kind(list_kind)) {
+	case ROW_MENU_TRACK_ADD:
+	case ROW_MENU_TRACK_REMOVE:
+		menu_track_id = result_tracks[index].id;
+		snprintf(menu_name, sizeof(menu_name), "%s", result_tracks[index].title);
+		break;
+	case ROW_MENU_ALBUM_ADD:
+	case ROW_MENU_ALBUM_REMOVE:
+		snprintf(menu_album_id, sizeof(menu_album_id), "%s", result_albums[index].id_text);
+		snprintf(menu_name, sizeof(menu_name), "%s", result_albums[index].title);
+		break;
+	case ROW_MENU_PLAYLIST_DELETE:
+		menu_playlist_id = result_playlists[index].id;
+		snprintf(menu_name, sizeof(menu_name), "%s", result_playlists[index].name);
+		break;
+	default:
+		break;
+	}
 
 	popover_item_t item;
 	memset(&item, 0, sizeof(item));
@@ -500,9 +552,16 @@ static void art_poll_cb(lv_timer_t *timer) {
 		bool finished = false;
 		if (!qobuzart_take(&qobuz_art_owner, slot, &image, &finished)) {
 			if (finished) {
-				row_art_failed[row] = true; // failed: never requested again
-				freed = true;
 				slot_owner[slot] = -1; // nothing to show: the slot goes back
+				// Only while the slots are this page's does "nothing" mean the
+				// cover could not be had. Once they are another page's, the
+				// row is simply asked for again when this one is next shown --
+				// and nothing is asked for from here meanwhile, which would
+				// take the slots back from the page on screen.
+				if (qobuzart_owns(&qobuz_art_owner)) {
+					row_art_failed[row] = true; // failed: never requested again
+					freed = true;
+				}
 			}
 			continue;
 		}
@@ -853,13 +912,40 @@ static void fill_list(int from) {
 // what comes back from the worker, on the GUI thread
 // ---------------------------------------------------------------------------
 
+static void job_result_taken(void) {
+	pthread_mutex_lock(&job_lock);
+	result_pending = false;
+	pthread_cond_broadcast(&result_taken);
+	pthread_mutex_unlock(&job_lock);
+}
+
 static void job_done_cb(void *user) {
 	(void)user;
-	busy_hide();
+	// From here to job_result_taken() the worker is held and nothing writes the
+	// result_* buffers underneath.
+	//
+	// The veil stays while another job is waiting its turn: it went up for that
+	// one, and this result -- another page of the list, or a track started --
+	// is not what it is waiting for.
+	pthread_mutex_lock(&job_lock);
+	bool another_waiting = have_pending;
+	pthread_mutex_unlock(&job_lock);
+	if (!another_waiting) {
+		busy_hide();
+	}
+
+	// A list of its own, as opposed to another page of the one on screen.
+	bool own_list = job_is_list(result_kind) && result_job_offset == 0;
 
 	if (result_error[0]) {
+		// Nothing was drawn: the list on screen is still the one before, and
+		// the history has to say so.
+		if (own_list) {
+			list_nav_restore();
+		}
 		gui_notify_popup(result_error);
 		page_loading = false;
+		job_result_taken();
 		return;
 	}
 
@@ -871,10 +957,9 @@ static void job_done_cb(void *user) {
 		break;
 
 	case JOB_PLAY:
-		// Nothing: the worker already opened the player the instant the music
-		// started. This point is reached much later -- after the next track has
-		// been prefetched too, which takes minutes -- and reopening it now
-		// would tear away whatever page the user has opened meanwhile.
+		// Nothing: the player was opened when the track was handed over to be
+		// started (play_start_async), and opening it again now would tear away
+		// whatever page the user has opened meanwhile.
 		break;
 
 	default:
@@ -883,11 +968,32 @@ static void job_done_cb(void *user) {
 		// the list really ended, and nothing more is requested.
 		page_loading = false;
 		page_more = (result_count - result_from == QOBUZ_PAGE_LIMIT) && result_count < QOBUZ_MAX_HELD;
+		if (own_list) {
+			list_nav_keep();
+		}
 		if (lv_screen_active() != list_screen && result_from == 0) {
 			switch_screen(list_screen);
 		}
 		break;
 	}
+	job_result_taken();
+}
+
+// Hands the finished job to the GUI thread. A full queue is tried again for a
+// few seconds rather than given up on: the veil only comes down in
+// job_done_cb(), and a result dropped here would leave it over the whole
+// interface. Past that the result is let go, so the worker is not held by a
+// GUI that takes nothing.
+static void post_job_done(void) {
+	for (int tries = 0; tries < 100; tries++) {
+		if (gui_post(job_done_cb, NULL)) {
+			return;
+		}
+		usleep(50 * 1000);
+	}
+	pthread_mutex_lock(&job_lock);
+	result_pending = false;
+	pthread_mutex_unlock(&job_lock);
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,10 +1142,30 @@ static void cover_ready_async(void *user) {
 	free(path);
 }
 
-static void play_started_async(void *user) {
-	(void)user;
-	player_refresh_now_playing();
-	switch_screen(player_screen);
+// The queue the worker has prepared, handed to the GUI thread to be started.
+//
+// The play queue has no lock and belongs to the GUI thread, which reads it from
+// several timers: the worker downloads and works out the paths, and loading
+// them into the queue is done here.
+typedef struct {
+	int count;
+	int start;
+	char paths[][512];
+} play_start_t;
+
+static void play_start_async(void *user) {
+	play_start_t *ps = user;
+	const char **list = malloc((size_t)ps->count * sizeof(*list));
+	if (list) {
+		for (int i = 0; i < ps->count; i++) {
+			list[i] = ps->paths[i];
+		}
+		device_state_play_list(list, ps->count, ps->start);
+		free(list);
+		player_refresh_now_playing();
+		switch_screen(player_screen);
+	}
+	free(ps);
 }
 
 
@@ -1072,6 +1198,14 @@ static bool prefetch_started;
 static long prefetch_failed_id;
 static uint32_t prefetch_failed_ms;
 #define PREFETCH_RETRY_MS 4000
+
+// A track that has failed this many times running is let go: the watchdog
+// stops asking for it, so the thread stops knocking and the Wi-Fi is no longer
+// held awake for a download that is not coming. Asking for it again by hand --
+// starting it, or starting any list -- gives it a fresh set of tries.
+#define PREFETCH_GIVE_UP_AFTER 30
+static int prefetch_failed_count; // the prefetch thread's own
+static long prefetch_gaveup_id;	  // under prefetch_lock
 
 static void *prefetch_main(void *arg);
 
@@ -1144,8 +1278,45 @@ static void prefetch_urgent(const char *wanted_path) {
 
 	pthread_mutex_lock(&prefetch_lock);
 	prefetch_want_id = wanted;
+	if (prefetch_gaveup_id == wanted) {
+		prefetch_gaveup_id = 0; // asked for again: tried again
+	}
 	pthread_cond_broadcast(&prefetch_ready);
 	pthread_mutex_unlock(&prefetch_lock);
+}
+
+// The track playback is stopped on is not coming: say so, and stop waiting.
+static void prefetch_gave_up_async(void *user) {
+	(void)user;
+	if (!waiting_for_track) {
+		return; // a fetch ahead: nobody is waiting on it yet
+	}
+	pthread_mutex_lock(&prefetch_lock);
+	long gone = prefetch_gaveup_id;
+	pthread_mutex_unlock(&prefetch_lock);
+	int index = playlist_current_index();
+	char path[512];
+	if (gone == 0 || index < 0 || !playlist_path_at(index, path, sizeof(path)) || qobuzcache_track_id(path) != gone) {
+		return;
+	}
+	waiting_for_track = false;
+	gui_notify_popup("download_failed");
+}
+
+// On the prefetch thread: one more failure for `id`.
+static void prefetch_note_failure(long id) {
+	prefetch_failed_count = id == prefetch_failed_id ? prefetch_failed_count + 1 : 1;
+	prefetch_failed_id = id;
+	prefetch_failed_ms = lv_tick_get();
+	if (prefetch_failed_count < PREFETCH_GIVE_UP_AFTER) {
+		return;
+	}
+	prefetch_failed_count = 0;
+	fprintf(stderr, "qobuz: %ld is not coming, giving up on it\n", id);
+	pthread_mutex_lock(&prefetch_lock);
+	prefetch_gaveup_id = id;
+	pthread_mutex_unlock(&prefetch_lock);
+	gui_post(prefetch_gave_up_async, NULL);
 }
 
 // Prefetches one track of the list while another plays: signed URL, download,
@@ -1192,8 +1363,8 @@ static bool prepare_track(const qobuz_track_t *track, char *path, size_t size) {
 	qobuzcache_note_played(path);
 
 	char *owned = strdup(path);
-	if (owned) {
-		gui_post(cover_ready_async, owned);
+	if (owned && !gui_post(cover_ready_async, owned)) {
+		free(owned);
 	}
 	return true;
 }
@@ -1247,32 +1418,41 @@ static void do_play(int index) {
 	// playback reaches a missing one first, device_state asks for it and it is
 	// downloaded there and then.
 	static char paths[QOBUZ_MAX_HELD][512];
-	static const char *path_ptr[QOBUZ_MAX_HELD];
 	const char *expected = qobuz_expected_mime();
 
-	queued_count = 0;
+	int count = 0;
 	int start = 0;
-	for (int i = 0; i < result_count && queued_count < QOBUZ_MAX_HELD; i++) {
+	for (int i = 0; i < result_count && count < QOBUZ_MAX_HELD; i++) {
 		if (!result_tracks[i].streamable) {
 			continue; // unplayable: it does not go in the queue
 		}
 		if (i == index) {
-			start = queued_count;
+			start = count;
 			// The tapped one has already downloaded: it is queued under its REAL
 			// name, which with an unexpected container may differ from the
 			// predicted one.
-			snprintf(paths[queued_count], sizeof(paths[0]), "%s", path);
+			snprintf(paths[count], sizeof(paths[0]), "%s", path);
 		} else {
-			qobuzcache_path(result_tracks[i].id, expected, paths[queued_count], sizeof(paths[0]));
+			qobuzcache_path(result_tracks[i].id, expected, paths[count], sizeof(paths[0]));
 		}
-		path_ptr[queued_count] = paths[queued_count];
-		queued_tracks[queued_count] = result_tracks[i];
-		queued_count++;
+		count++;
 	}
 
-	if (queued_count == 0) {
+	if (count == 0) {
 		return;
 	}
+
+	// The same tracks, in the same order, for the prefetch thread: it reads
+	// this list under the same lock, so it never sees one half written.
+	pthread_mutex_lock(&prefetch_lock);
+	queued_count = 0;
+	for (int i = 0; i < result_count && queued_count < QOBUZ_MAX_HELD; i++) {
+		if (result_tracks[i].streamable) {
+			queued_tracks[queued_count++] = result_tracks[i];
+		}
+	}
+	prefetch_gaveup_id = 0; // a list started by hand: everything in it is tried
+	pthread_mutex_unlock(&prefetch_lock);
 
 	// Tags for the WHOLE queue, immediately. They are text files of a few dozen
 	// bytes and cost nothing (no covers here: those are downloads, and arrive
@@ -1287,15 +1467,29 @@ static void do_play(int index) {
 		qobuzcache_write_sidecars(t->id, expected, t->title, t->artist, t->album, t->album_id, t->track_number, NULL);
 	}
 
-	device_state_play_list(path_ptr, queued_count, start);
+	// Started on the GUI thread, which owns the play queue: a copy of the paths
+	// goes over, since this array is written again by the next tap.
+	play_start_t *ps = malloc(sizeof(*ps) + (size_t)count * sizeof(ps->paths[0]));
+	if (ps) {
+		ps->count = count;
+		ps->start = start;
+		memcpy(ps->paths, paths, (size_t)count * sizeof(ps->paths[0]));
+	}
+	if (!ps || !gui_post(play_start_async, ps)) {
+		free(ps);
+		snprintf(result_error, sizeof(result_error), "%s", tr("download_failed"));
+		return;
+	}
 
-	// The cover last, with the music already playing: it is another download and
-	// not worth delaying the first note for. It deliberately comes before the
-	// player is opened, so the image is there when the page appears.
+	// The cover last, with the music already starting: it is another download
+	// and not worth delaying the first note for. The player is told when it has
+	// landed, as for a prefetched track.
 	qobuzcache_write_sidecars(track->id, mime, track->title, track->artist, track->album, track->album_id,
 							  track->track_number, track->cover);
-
-	gui_post(play_started_async, NULL);
+	char *owned = strdup(path);
+	if (owned && !gui_post(cover_ready_async, owned)) {
+		free(owned);
+	}
 
 	// The following tracks are prefetched on their own thread.
 	prefetch_submit(start);
@@ -1361,6 +1555,10 @@ static void queue_watch_cb(lv_timer_t *timer) {
 	// The identifier is read from the PATH the queue gives for that position --
 	// the queue is what knows its own order, shuffle included.
 	// `queued_tracks[i]` for the same `i` may be an entirely different track.
+	pthread_mutex_lock(&prefetch_lock);
+	long gaveup_id = prefetch_gaveup_id;
+	pthread_mutex_unlock(&prefetch_lock);
+
 	long want_id = 0;
 	if (!library_queue && !transfer_on && current >= 0 && queued_count > 0) {
 		for (int i = current; i <= current + PREFETCH_AHEAD && i < count && want_id == 0; i++) {
@@ -1369,6 +1567,14 @@ static void queue_watch_cb(lv_timer_t *timer) {
 				continue;
 			}
 			long id = qobuzcache_track_id(path);
+			if (id != 0 && id == gaveup_id) {
+				// Given up on (see PREFETCH_GIVE_UP_AFTER): not asked for, and
+				// if it is the one playback stopped on, not waited for either.
+				if (i == current) {
+					waiting_for_track = false;
+				}
+				continue;
+			}
 			if (id != 0 && !qobuzcache_find(id, NULL, 0)) {
 				want_id = id;
 			}
@@ -1422,19 +1628,24 @@ static void *prefetch_main(void *arg) {
 
 		// From identifier to track: the data (title, duration, cover) is taken
 		// from the queued list by SEARCHING, not by trusting a position.
-		int index = -1;
-		for (int i = 0; i < queued_count && index < 0; i++) {
+		// Under the lock, and copied out under it: the worker rewrites the list
+		// when another one is started.
+		qobuz_track_t track;
+		bool known = false;
+		pthread_mutex_lock(&prefetch_lock);
+		for (int i = 0; i < queued_count && !known; i++) {
 			if (queued_tracks[i].id == id) {
-				index = i;
+				track = queued_tracks[i];
+				known = true;
 			}
 		}
+		pthread_mutex_unlock(&prefetch_lock);
 
-		if (index < 0) {
+		if (!known) {
 			// Not in the queue being played: wait for the watchdog to recompute
 			// instead of downloading for the previous queue.
 			fprintf(stderr, "qobuz: %ld is not in the list we know, not downloading it\n", id);
-			prefetch_failed_id = id;
-			prefetch_failed_ms = lv_tick_get();
+			prefetch_note_failure(id);
 			pthread_mutex_lock(&prefetch_lock);
 			if (prefetch_want_id == id) {
 				prefetch_want_id = 0;
@@ -1443,7 +1654,6 @@ static void *prefetch_main(void *arg) {
 			continue;
 		}
 
-		qobuz_track_t track = queued_tracks[index];
 		qobuzcache_wait_idle();
 
 		// While waiting for the slot the request may have changed: prev is
@@ -1461,10 +1671,20 @@ static void *prefetch_main(void *arg) {
 		bool ok = prepare_track(&track, next_path, sizeof(next_path));
 		if (!ok) {
 			fprintf(stderr, "qobuz: %ld does not download: %s\n", track.id, qobuzcache_last_error());
-			prefetch_failed_id = id;
-			prefetch_failed_ms = lv_tick_get();
+			// Dropped for another track rather than refused: not a failure of
+			// this one's.
+			pthread_mutex_lock(&prefetch_lock);
+			bool passed_over = prefetch_want_id != 0 && prefetch_want_id != id;
+			pthread_mutex_unlock(&prefetch_lock);
+			if (passed_over) {
+				prefetch_failed_id = id;
+				prefetch_failed_ms = lv_tick_get();
+			} else {
+				prefetch_note_failure(id);
+			}
 		} else if (prefetch_failed_id == id) {
 			prefetch_failed_id = 0;
+			prefetch_failed_count = 0;
 		}
 
 		// However it went, this request has been served: the watchdog will
@@ -1510,12 +1730,39 @@ static void *worker_main(void *arg) {
 		while (!have_pending) {
 			pthread_cond_wait(&job_ready, &job_lock);
 		}
+		// The previous result must have been taken, or it would be overwritten
+		// under whoever is reading it. Two seconds of patience and then proceed
+		// anyway: see the comment on result_pending.
+		if (result_pending) {
+			struct timespec until;
+			struct timeval now;
+			gettimeofday(&now, NULL);
+			until.tv_sec = now.tv_sec + 2;
+			until.tv_nsec = now.tv_usec * 1000;
+			while (result_pending) {
+				if (pthread_cond_timedwait(&result_taken, &job_lock, &until) == ETIMEDOUT) {
+					break;
+				}
+			}
+		}
+
 		job_t job = pending;
 		have_pending = false;
 		pthread_mutex_unlock(&job_lock);
 
 		result_error[0] = '\0';
 		result_kind = job.kind;
+
+		// The length and the title of the list on screen, saved before anything
+		// is touched. A failing job never calls fill_list() -- job_done_cb()
+		// shows the error and returns -- so the rows before it stay on screen,
+		// and the count has to be put back or `index >= result_count` would
+		// turn away every tap on them. A failing request returns before it
+		// writes into the arrays (see qobuz.c), so the count is all there is to
+		// restore.
+		int kept_count = result_count;
+		char kept_title[sizeof(result_title)];
+		snprintf(kept_title, sizeof(kept_title), "%s", result_title);
 
 		// Where this page starts. 0 is a new list; anything higher continues the
 		// one already held, and the tail of the array is the only part written.
@@ -1602,11 +1849,20 @@ static void *worker_main(void *arg) {
 			n = 0;
 		}
 		if (job.kind != JOB_PLAY) {
-			result_from = off;
-			result_count = off + n;
+			result_job_offset = off;
+			if (result_error[0]) {
+				result_count = kept_count;
+				snprintf(result_title, sizeof(result_title), "%s", kept_title);
+			} else {
+				result_from = off;
+				result_count = off + n;
+			}
 		}
 
-		gui_post(job_done_cb, NULL);
+		pthread_mutex_lock(&job_lock);
+		result_pending = true;
+		pthread_mutex_unlock(&job_lock);
+		post_job_done();
 	}
 	return NULL;
 }
@@ -1643,6 +1899,35 @@ static bool have_current_list;
 
 static bool job_is_list(job_kind_t kind) { return kind != JOB_PLAY && kind != JOB_LOGIN && kind != JOB_NONE; }
 
+// The history as it stood before the list request in flight moved it. The
+// step is taken when the request starts; if the list never arrives the page
+// still shows the one before, and the history is put back to match
+// (list_nav_restore). The entries above the saved length are still in the
+// array, so the length and the current job are all there is to keep.
+static int nav_kept_len;
+static job_t nav_kept_job;
+static bool nav_kept_have;
+static bool nav_kept_valid;
+
+static void list_nav_save(void) {
+	nav_kept_len = list_history_len;
+	nav_kept_job = current_list_job;
+	nav_kept_have = have_current_list;
+	nav_kept_valid = true;
+}
+
+static void list_nav_keep(void) { nav_kept_valid = false; }
+
+static void list_nav_restore(void) {
+	if (!nav_kept_valid) {
+		return;
+	}
+	nav_kept_valid = false;
+	list_history_len = nav_kept_len;
+	current_list_job = nav_kept_job;
+	have_current_list = nav_kept_have;
+}
+
 // Peek for the back-swipe guard: is there a step to consume inside the page?
 // It changes nothing -- it only keeps another screen from being drawn under the
 // finger.
@@ -1653,6 +1938,7 @@ static bool list_back_guard(void) {
 		have_current_list = false;
 		return false; // nothing underneath: leave the page
 	}
+	list_nav_save();
 	job_t previous = list_history[--list_history_len];
 	// Re-submitted without stacking: this IS the step back.
 	have_current_list = true;
@@ -1669,6 +1955,7 @@ static void run(const job_t *job, const char *waiting_text) {
 	// A job that opens another list while a list is already open: the previous
 	// one must be remembered, otherwise the step back skips it.
 	if (job_is_list(job->kind)) {
+		list_nav_save();
 		// Re-reading the SAME list (after removing a favourite, say) is not a
 		// step forward: the whole job is compared, not just its kind, otherwise
 		// two albums in a row would not stack.
@@ -1902,7 +2189,7 @@ static void build_search_page(gui_config_t *cfg) {
 	// Room for it, so a long query does not run underneath.
 	lv_obj_set_style_pad_right(search_field, 60, 0);
 
-	static const char *const KINDS[] = {"tracks_2", "albums", "artists"};
+	static const char *const KINDS[] = {"search_tracks_2", "albums", "artists"};
 	for (int i = 0; i < 3; i++) {
 		lv_obj_t *pill = lv_btn_create(search_screen);
 		lv_obj_set_size(pill, 140, 52);

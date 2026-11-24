@@ -1,6 +1,7 @@
 #include "podcastdl.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -128,6 +129,29 @@ static bool folder_of(const char *feed_title, char *out, size_t size) {
 	return n > 0 && (size_t)n < size;
 }
 
+// The episode a saved file belongs to, from the sidecar written beside it. 0
+// when there is no sidecar or it names none.
+static long long saved_episode_id(const char *path) {
+	char tags[800];
+	if ((size_t)snprintf(tags, sizeof(tags), "%s.tags", path) >= sizeof(tags)) {
+		return 0;
+	}
+	FILE *f = fopen(tags, "r");
+	if (!f) {
+		return 0;
+	}
+	long long id = 0;
+	char line[1024];
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "episode_id=", 11) == 0) {
+			id = strtoll(line + 11, NULL, 10);
+			break;
+		}
+	}
+	fclose(f);
+	return id;
+}
+
 bool podcastdl_path(const podcast_episode_t *episode, const char *feed_title, char *out, size_t size) {
 	if (!episode || !out || size == 0) {
 		return false;
@@ -141,6 +165,21 @@ bool podcastdl_path(const podcast_episode_t *episode, const char *feed_title, ch
 	char name[DL_NAME_MAX + 1];
 	podcastdl_safe_name(episode->title, fallback, name, sizeof(name));
 	snprintf(out, size, "%s/%s.%s", folder, name, extension_for(episode->mime));
+
+	// Two episodes of one podcast can carry the same title. The second to be
+	// saved takes a name with its id in it, and keeps that name for as long as
+	// its file is there; the plain name stays with the episode that holds it.
+	if (episode->id > 0) {
+		char own[768];
+		struct stat st;
+		int n = snprintf(own, sizeof(own), "%s/%s %lld.%s", folder, name, episode->id, extension_for(episode->mime));
+		if (n > 0 && (size_t)n < sizeof(own) && (size_t)n < size) {
+			long long holder = 0;
+			if (stat(own, &st) == 0 || (stat(out, &st) == 0 && (holder = saved_episode_id(out)) > 0 && holder != episode->id)) {
+				snprintf(out, size, "%s", own);
+			}
+		}
+	}
 	return true;
 }
 
@@ -201,6 +240,15 @@ static bool download_body(job_t *job) {
 	}
 	if (!http_stream_open(st, job->episode.enclosure, DL_TIMEOUT_SECS)) {
 		fprintf(stderr, "podcastdl: %s does not open\n", job->episode.enclosure);
+		free(st);
+		return false;
+	}
+	// The length is a long, 32 bits on the player, and one that does not fit
+	// comes back saturated: the whole file would be fetched and then fail the
+	// length check below, so it is refused here.
+	if (st->content_length >= LONG_MAX) {
+		fprintf(stderr, "podcastdl: %s is too large to download\n", job->episode.enclosure);
+		http_stream_close(st);
 		free(st);
 		return false;
 	}

@@ -175,6 +175,9 @@ static void process_scanline(png_stream_t *s, uint8_t filter, uint8_t *data) {
 	}
 }
 
+// The largest width or height this decodes.
+#define PNG_MAX_SIDE 16384
+
 uint8_t *png_scaled_decode(const uint8_t *data, size_t size, int min_box, int *out_w, int *out_h) {
 	static const uint8_t magic[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
 	if (!data || size < 45 || memcmp(data, magic, 8) != 0 || !out_w || !out_h) {
@@ -197,7 +200,9 @@ uint8_t *png_scaled_decode(const uint8_t *data, size_t size, int min_box, int *o
 		uint32_t len = be32(data + pos);
 		const uint8_t *type = data + pos + 4;
 		size_t body = pos + 8;
-		if (body + len > size) {
+		// Compared against what is left, not summed: on a 32-bit size_t a
+		// length near 4 GB wraps the sum back inside the buffer.
+		if (len > size - body) {
 			break;
 		}
 
@@ -221,6 +226,11 @@ uint8_t *png_scaled_decode(const uint8_t *data, size_t size, int min_box, int *o
 	}
 
 	if (!have_ihdr || !have_idat || info.width < 1 || info.height < 1) {
+		return NULL;
+	}
+	// A ceiling on the claimed size, so that width times channels fits a 32-bit
+	// size_t. No cover is this large.
+	if (info.width > PNG_MAX_SIDE || info.height > PNG_MAX_SIDE) {
 		return NULL;
 	}
 	// 8-bit non-interlaced only; everything else is rare enough for stb.
@@ -315,7 +325,7 @@ uint8_t *png_scaled_decode(const uint8_t *data, size_t size, int min_box, int *o
 					uint32_t clen = be32(data + chunk_pos);
 					const uint8_t *ctype = data + chunk_pos + 4;
 					size_t cbody = chunk_pos + 8;
-					if (cbody + clen > size) {
+					if (clen > size - cbody) {
 						break;
 					}
 					chunk_pos = cbody + clen + 4;

@@ -22,6 +22,7 @@
 #include "src/system/db/sqlite3.h"
 #include "src/system/library/cue.h"
 #include "src/system/decode/sacd_iso.h"
+#include "src/system/decode/decode.h"
 #include "src/system/decode/mp4.h"
 #include "src/system/decode/apedec.h"
 #include "src/system/library/metadata.h"
@@ -1072,6 +1073,75 @@ static bool exec_quiet(const char *sql) {
 	return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
 }
 
+// ---------------------------------------------------------------------------
+// Transactions on the one connection
+//
+// A scan holds a transaction open across the whole card, letting go of db_lock
+// between files, and a playlist being written holds one from its first row to
+// its last. Whatever else writes several rows at once does so inside a
+// savepoint, which nests in either: releasing it ends only itself, where a
+// COMMIT would end the transaction it happened to be running in.
+// ---------------------------------------------------------------------------
+
+// Bumped when the scan takes the connection's transaction for itself, and when
+// the connection goes: a transaction begun before that is no longer there to
+// commit or roll back (see library_playlist_write_end).
+static unsigned txn_epoch;
+
+// The scan thread has a transaction of its own open.
+static bool scan_txn;
+
+// Bumped when the connection goes: which database a write was begun on.
+static unsigned db_serial;
+
+// Opens a group of writes, with db_lock held for the whole of it. `outer` says
+// no transaction was open, so the group is one.
+static bool group_begin(bool *outer) {
+	*outer = db && sqlite3_get_autocommit(db) != 0;
+	return db && exec("SAVEPOINT write_group");
+}
+
+// Ends it: kept, or with `keep` false undone. Returns whether it was kept.
+static bool group_end(bool outer, bool keep) {
+	if (!keep) {
+		exec("ROLLBACK TO write_group");
+	}
+	if (!exec("RELEASE write_group")) {
+		// As a transaction of its own it must not be left open behind a commit
+		// that failed.
+		if (outer) {
+			exec("ROLLBACK");
+		}
+		return false;
+	}
+	return keep;
+}
+
+// Opens the scan's transaction, with db_lock held. One left open by a playlist
+// being written is committed first, so the scan's commits and rollbacks are of
+// its own rows.
+static bool scan_txn_begin(void) {
+	if (!db) {
+		return false;
+	}
+	if (!sqlite3_get_autocommit(db)) {
+		exec("COMMIT");
+	}
+	txn_epoch++;
+	scan_txn = exec("BEGIN");
+	return scan_txn;
+}
+
+// Ends it, with db_lock held. Nothing when it was never opened or is already
+// over.
+static void scan_txn_end(bool keep) {
+	bool open = scan_txn && db && !sqlite3_get_autocommit(db);
+	scan_txn = false;
+	if (open) {
+		exec(keep ? "COMMIT" : "ROLLBACK");
+	}
+}
+
 // A monotonic millisecond reading, only ever used as a difference.
 static uint32_t now_ms(void) {
 	struct timespec now;
@@ -1451,6 +1521,9 @@ void library_close(void) {
 			fprintf(stderr, "library: sqlite3_close returned %d; the handle may be leaking\n", rc);
 		}
 		db = NULL;
+		txn_epoch++;
+		db_serial++;
+		scan_txn = false;
 		artist_links = album_artist_links = genre_links = false;
 		bump_all_generations(); // every open list is now looking at nothing
 	}
@@ -1549,6 +1622,9 @@ static bool replace_damaged(void) {
 	if (db) {
 		sqlite3_close_v2(db); // statements still held elsewhere keep it alive until they go
 		db = NULL;
+		txn_epoch++;
+		db_serial++;
+		scan_txn = false;
 	}
 	artist_links = album_artist_links = genre_links = false;
 
@@ -2316,7 +2392,8 @@ int library_fav_add_many(const library_fav_row_t *rows, int count) {
 	pthread_mutex_lock(&db_lock);
 	int starred = 0;
 	if (db) {
-		exec("BEGIN");
+		bool outer = false;
+		group_begin(&outer);
 		sqlite3_stmt *stmt = NULL;
 		bool ok = sqlite3_prepare_v2(db,
 									 "INSERT OR IGNORE INTO FAVOURITES(path,name,artist,added_at)"
@@ -2335,8 +2412,7 @@ int library_fav_add_many(const library_fav_row_t *rows, int count) {
 			sqlite3_reset(stmt);
 		}
 		sqlite3_finalize(stmt);
-		exec(ok ? "COMMIT" : "ROLLBACK");
-		if (!ok) {
+		if (!group_end(outer, ok)) {
 			starred = 0;
 		}
 		bump_generation(GEN_FAVOURITES);
@@ -2353,7 +2429,8 @@ int library_fav_remove_many(const char *const *paths, int count) {
 	pthread_mutex_lock(&db_lock);
 	int removed = 0;
 	if (db) {
-		exec("BEGIN");
+		bool outer = false;
+		group_begin(&outer);
 		sqlite3_stmt *stmt = NULL;
 		bool ok = sqlite3_prepare_v2(db, "DELETE FROM FAVOURITES WHERE path=?", -1, &stmt, NULL) == SQLITE_OK;
 		for (int i = 0; i < count && ok; i++) {
@@ -2366,8 +2443,7 @@ int library_fav_remove_many(const char *const *paths, int count) {
 			sqlite3_reset(stmt);
 		}
 		sqlite3_finalize(stmt);
-		exec(ok ? "COMMIT" : "ROLLBACK");
-		if (!ok) {
+		if (!group_end(outer, ok)) {
 			removed = 0;
 		}
 		bump_generation(GEN_FAVOURITES);
@@ -2610,6 +2686,24 @@ static bool playlist_table(const char *name, char *out, size_t out_size) {
 #define PLAYLIST_ARTIST                                                                                        \
 	"COALESCE(NULLIF((SELECT m.artist FROM MEDIA_TABLE m WHERE m.path = p.path LIMIT 1), ''), p.artist)"
 
+// How long a track of MEDIA_TABLE plays, in milliseconds, 0 when the index does
+// not say. The scan writes where the track begins and ends in its file into
+// begin_time and end_time, the two columns the stock schema has for it: 0 and
+// the file's length for a file of its own, the track's stretch of the audio
+// for a track of a sheet. end_time is 0 on a row written before lengths were
+// kept, and -1 on one whose length could not be had. `t` is the table's alias
+// with its dot, or nothing.
+#define TRACK_LENGTH_MS(t) "(CASE WHEN " t "end_time > " t "begin_time THEN " t "end_time - " t "begin_time ELSE 0 END)"
+
+// The same for a row of another table that names a track by `path_column`.
+#define LENGTH_BY_PATH(path_column)                                                                            \
+	"IFNULL((SELECT " TRACK_LENGTH_MS("m.") " FROM MEDIA_TABLE m WHERE m.path = " path_column " LIMIT 1), 0)"
+
+// And for a playlist row: the library's, then the seconds written down with
+// the entry.
+#define PLAYLIST_LENGTH                                                                                        \
+	"IFNULL(NULLIF(" LENGTH_BY_PATH("p.path") ", 0), CASE WHEN p.seconds > 0 THEN p.seconds * 1000 ELSE 0 END)"
+
 // The ordered query behind a list, as SQL. `select` is what to ask for, so the
 // same builder serves both the row-id pass and the streaming reader.
 // The LIKE pattern a query becomes: folded the way foldcase() folds the rows,
@@ -2821,13 +2915,17 @@ static void list_sql(char *sql, size_t size, const char *select, library_list_t 
 //
 // `out` is only written for the kinds whose table is named by the list itself,
 // which today is the playlists; everything else answers with a literal.
+//
+// The lists of tracks carry a fourth column, the track's length in
+// milliseconds (TRACK_LENGTH_MS); the lists of names have three.
 static const char *row_by_id_sql(library_list_t kind, const char *value, char *out, size_t out_size) {
 	if (kind == LIBRARY_LIST_PLAYLIST) {
 		char quoted[PLAYLIST_TABLE_MAX];
 		if (!playlist_table(value, quoted, sizeof(quoted))) {
 			return NULL;
 		}
-		if (snprintf(out, out_size, "SELECT " PLAYLIST_TITLE ", p.path, " PLAYLIST_ARTIST " FROM %s p WHERE p.rowid=?",
+		if (snprintf(out, out_size,
+					 "SELECT " PLAYLIST_TITLE ", p.path, " PLAYLIST_ARTIST ", " PLAYLIST_LENGTH " FROM %s p WHERE p.rowid=?",
 					 quoted) >= (int)out_size) {
 			return NULL;
 		}
@@ -2835,7 +2933,7 @@ static const char *row_by_id_sql(library_list_t kind, const char *value, char *o
 	}
 	switch (kind) {
 	case LIBRARY_LIST_TRACKS:
-		return "SELECT name, path, artist FROM MEDIA_TABLE WHERE rowid=?";
+		return "SELECT name, path, artist, " TRACK_LENGTH_MS("") " FROM MEDIA_TABLE WHERE rowid=?";
 	case LIBRARY_LIST_ALBUMS:
 		// An album row wants its cover, and covers hang off files: hand the
 		// caller one representative track per album to load the art from. This
@@ -2858,9 +2956,11 @@ static const char *row_by_id_sql(library_list_t kind, const char *value, char *o
 		// The row is one of the year's albums, and the name is its year.
 		return "SELECT " ALBUM_GROUP_YEAR ", NULL, NULL FROM ALBUM_GROUP_TABLE g WHERE rowid=?";
 	case LIBRARY_LIST_FAVOURITES:
-		return "SELECT " FAV_NAME ", path, " FAV_ARTIST " FROM FAVOURITES WHERE rowid=?";
+		return "SELECT " FAV_NAME ", path, " FAV_ARTIST ", " LENGTH_BY_PATH("FAVOURITES.path")
+			   " FROM FAVOURITES WHERE rowid=?";
 	case LIBRARY_LIST_MOST_PLAYED:
-		return "SELECT " PLAYS_NAME ", path, " PLAYS_ARTIST " FROM PLAY_COUNTS WHERE rowid=?";
+		return "SELECT " PLAYS_NAME ", path, " PLAYS_ARTIST ", " LENGTH_BY_PATH("PLAY_COUNTS.path")
+			   " FROM PLAY_COUNTS WHERE rowid=?";
 	default:
 		return NULL;
 	}
@@ -2945,7 +3045,12 @@ library_index_t *library_index_open(library_list_t kind, library_filter_t filter
 	// COUNT(*) has no business sorting: the ORDER BY the builder appended is
 	// dead weight on a query that returns one row, and SQLite would still build
 	// the sorter for it.
-	char *order_by = strstr(count_sql, " ORDER BY ");
+	// The last one in the statement: a playlist's name is part of the text, and
+	// may hold the same words.
+	char *order_by = NULL;
+	for (char *at = strstr(count_sql, " ORDER BY "); at; at = strstr(at + 1, " ORDER BY ")) {
+		order_by = at;
+	}
 	if (order_by) {
 		*order_by = '\0';
 	}
@@ -3084,15 +3189,17 @@ static int row_slot(const struct library_index *ix, int index) {
 	return ix->desc ? ix->count - 1 - index : index;
 }
 
-int library_index_window(const library_index_t *ix, int offset, int count, library_row_cb cb, void *user) {
-	if (!ix || !cb || offset < 0 || count <= 0 || offset >= ix->count) {
+// The windowed read behind both forms below: one of the two callbacks is set.
+static int index_window(const library_index_t *ix, int offset, int count, library_row_cb cb, library_timed_row_cb timed,
+						void *user) {
+	if (!ix || (!cb && !timed) || offset < 0 || count <= 0 || offset >= ix->count) {
 		return 0;
 	}
 	if (offset + count > ix->count) {
 		count = ix->count - offset;
 	}
 
-	char sql_buf[PLAYLIST_TABLE_MAX + 384];
+	char sql_buf[PLAYLIST_TABLE_MAX + 768];
 	const char *sql = row_by_id_sql(ix->kind, ix->value, sql_buf, sizeof(sql_buf));
 	if (!sql) {
 		return 0;
@@ -3117,7 +3224,7 @@ int library_index_window(const library_index_t *ix, int offset, int count, libra
 				// The row went while the window was being read. The window is
 				// positional, so it gets a blank rather than the next row
 				// shifted into its place.
-				if (!cb("", NULL, NULL, user)) {
+				if (!(cb ? cb("", NULL, NULL, user) : timed("", NULL, NULL, 0, user))) {
 					break;
 				}
 				delivered++;
@@ -3126,7 +3233,8 @@ int library_index_window(const library_index_t *ix, int offset, int count, libra
 			const char *name = (const char *)sqlite3_column_text(stmt, 0);
 			const char *path = (const char *)sqlite3_column_text(stmt, 1);
 			const char *artist = (const char *)sqlite3_column_text(stmt, 2);
-			if (!cb(name ? name : "", path, artist, user)) {
+			int length_ms = sqlite3_column_count(stmt) > 3 ? sqlite3_column_int(stmt, 3) : 0;
+			if (!(cb ? cb(name ? name : "", path, artist, user) : timed(name ? name : "", path, artist, length_ms, user))) {
 				break;
 			}
 			delivered++;
@@ -3136,6 +3244,62 @@ int library_index_window(const library_index_t *ix, int offset, int count, libra
 
 	pthread_mutex_unlock(&db_lock);
 	return delivered;
+}
+
+int library_index_window(const library_index_t *ix, int offset, int count, library_row_cb cb, void *user) {
+	return cb ? index_window(ix, offset, count, cb, NULL, user) : 0;
+}
+
+int library_index_window_timed(const library_index_t *ix, int offset, int count, library_timed_row_cb cb, void *user) {
+	return cb ? index_window(ix, offset, count, NULL, cb, user) : 0;
+}
+
+bool library_index_length(const library_index_t *ix, long long *total_ms, int *unknown) {
+	if (total_ms) {
+		*total_ms = 0;
+	}
+	if (unknown) {
+		*unknown = 0;
+	}
+	if (!ix) {
+		return false;
+	}
+	char sql_buf[PLAYLIST_TABLE_MAX + 768];
+	const char *sql = row_by_id_sql(ix->kind, ix->value, sql_buf, sizeof(sql_buf));
+	if (!sql) {
+		return false;
+	}
+
+	// One lookup by row id per track, all under one lock: the rows of an album
+	// are a few pages of one table, read once.
+	pthread_mutex_lock(&db_lock);
+	bool ok = false;
+	long long total = 0;
+	int missing = 0;
+	sqlite3_stmt *stmt = NULL;
+	if (db && ix->generation == generation[ix->domain] && sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+		ok = sqlite3_column_count(stmt) > 3; // a list of tracks
+		for (int i = 0; ok && i < ix->count; i++) {
+			sqlite3_reset(stmt);
+			sqlite3_bind_int64(stmt, 1, ix->rows[i]);
+			int length_ms = sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int(stmt, 3) : 0;
+			if (length_ms > 0) {
+				total += length_ms;
+			} else {
+				missing++;
+			}
+		}
+	}
+	sqlite3_finalize(stmt);
+	pthread_mutex_unlock(&db_lock);
+
+	if (ok && total_ms) {
+		*total_ms = total;
+	}
+	if (ok && unknown) {
+		*unknown = missing;
+	}
+	return ok;
 }
 
 library_index_t *library_index_clone(const library_index_t *ix) {
@@ -3427,8 +3591,13 @@ static uint32_t le32(const unsigned char *p) {
 	return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | p[0];
 }
 
-// STREAMINFO packs the rate in 20 bits and the depth in 5, straddling bytes.
-static void probe_flac(FILE *f, int *rate, int *bits) {
+static uint32_t be32(const unsigned char *p) {
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+// STREAMINFO packs the rate in 20 bits and the depth in 5, straddling bytes,
+// and the number of samples in the 36 bits after them.
+static void probe_flac(FILE *f, int *rate, int *bits, int64_t *ms) {
 	unsigned char head[4];
 	if (fread(head, 1, 4, f) != 4) {
 		return;
@@ -3459,16 +3628,22 @@ static void probe_flac(FILE *f, int *rate, int *bits) {
 	const unsigned char *si = block + 4;
 	*rate = (int)(((uint32_t)si[10] << 12) | ((uint32_t)si[11] << 4) | (uint32_t)(si[12] >> 4));
 	*bits = (int)((((si[12] & 0x01) << 4) | (si[13] >> 4)) + 1);
+	uint64_t samples = ((uint64_t)(si[13] & 0x0f) << 32) | be32(si + 14);
+	if (*rate > 0) {
+		*ms = (int64_t)(samples * 1000 / (uint64_t)*rate);
+	}
 }
 
-static void probe_wav(FILE *f, int *rate, int *bits) {
+static void probe_wav(FILE *f, int *rate, int *bits, int64_t *ms) {
 	unsigned char head[12];
 	if (fread(head, 1, sizeof(head), f) != sizeof(head) || memcmp(head, "RIFF", 4) != 0 ||
 		memcmp(head + 8, "WAVE", 4) != 0) {
 		return;
 	}
-	// The chunks, until `fmt `. Bounded: a file that is not one would otherwise
-	// be walked to its end.
+	// The chunks, until `fmt ` and then `data`, whose size over the byte rate is
+	// the length. Bounded: a file that is not one would otherwise be walked to
+	// its end.
+	uint32_t byte_rate = 0;
 	for (int i = 0; i < 32; i++) {
 		unsigned char chunk[8];
 		if (fread(chunk, 1, sizeof(chunk), f) != sizeof(chunk)) {
@@ -3482,17 +3657,29 @@ static void probe_wav(FILE *f, int *rate, int *bits) {
 			}
 			*rate = (int)le32(fmt + 4);
 			*bits = (int)(fmt[14] | ((uint32_t)fmt[15] << 8));
+			byte_rate = le32(fmt + 8);
+			size -= sizeof(fmt);
+		} else if (memcmp(chunk, "data", 4) == 0) {
+			// A size that runs past the file, or was never filled in, is read as
+			// the rest of the file.
+			off_t at = ftello(f);
+			off_t end = fseeko(f, 0, SEEK_END) == 0 ? ftello(f) : -1;
+			if (byte_rate > 0 && at >= 0 && end >= at) {
+				uint64_t bytes = size > 0 && (off_t)size <= end - at ? size : (uint64_t)(end - at);
+				*ms = (int64_t)(bytes * 1000 / byte_rate);
+			}
 			return;
 		}
-		if (fseek(f, (long)size + (size & 1), SEEK_CUR) != 0) {
+		if (fseeko(f, (off_t)size + (off_t)(size & 1), SEEK_CUR) != 0) {
 			return;
 		}
 	}
 }
 
 // DSF: a 28-byte "DSD " chunk, then a `fmt ` chunk carrying the rate 28 bytes
-// in. The same offsets parse_dsf() in the decoder reads.
-static void probe_dsf(FILE *f, int *rate, int *bits) {
+// in and the number of samples of one channel 36 bytes in. The same offsets
+// parse_dsf() in the decoder reads.
+static void probe_dsf(FILE *f, int *rate, int *bits, int64_t *ms) {
 	unsigned char head[80]; // 28 of DSD chunk, then the head of the fmt chunk
 	if (fread(head, 1, sizeof(head), f) != sizeof(head) || memcmp(head, "DSD ", 4) != 0 ||
 		memcmp(head + 28, "fmt ", 4) != 0) {
@@ -3500,16 +3687,206 @@ static void probe_dsf(FILE *f, int *rate, int *bits) {
 	}
 	*rate = (int)le32(head + 28 + 28);
 	*bits = 1; // one bit per sample is what DSD is
+	uint64_t samples = le32(head + 28 + 36) | ((uint64_t)le32(head + 28 + 40) << 32);
+	if (*rate > 0) {
+		*ms = (int64_t)(samples * 1000 / (uint64_t)*rate);
+	}
+}
+
+// One MPEG layer III frame header: its bit rate in kbps, its sample rate, how
+// many samples and bytes the frame holds, and how many bytes of side
+// information follow the header. False when the four bytes are not one.
+static bool mp3_header(const unsigned char *h, int *kbps, int *rate, int *samples, int *bytes, int *side) {
+	static const int KBPS_V1[16] = {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0};
+	static const int KBPS_V2[16] = {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0};
+	static const int RATES[4] = {44100, 48000, 32000, 0};
+	if (h[0] != 0xff || (h[1] & 0xe0) != 0xe0) {
+		return false;
+	}
+	int version = (h[1] >> 3) & 3; // 3 is MPEG-1, 2 MPEG-2, 0 MPEG-2.5
+	int layer = (h[1] >> 1) & 3;   // 1 is layer III
+	int rate_at = (h[2] >> 2) & 3;
+	*kbps = version == 3 ? KBPS_V1[h[2] >> 4] : KBPS_V2[h[2] >> 4];
+	if (version == 1 || layer != 1 || *kbps == 0 || rate_at == 3) {
+		return false;
+	}
+	*rate = RATES[rate_at] >> (version == 3 ? 0 : version == 2 ? 1 : 2);
+	*samples = version == 3 ? 1152 : 576;
+	*bytes = (*samples / 8) * *kbps * 1000 / *rate + ((h[2] >> 1) & 1);
+	bool mono = (h[3] >> 6) == 3;
+	*side = version == 3 ? (mono ? 17 : 32) : (mono ? 9 : 17);
+	return true;
+}
+
+// How much of the front of an MP3 is read to learn its length.
+#define MP3_HEAD_BYTES 16384
+
+// The length of an MP3 without reading it: from the frame count a Xing, Info
+// or VBRI header carries, and failing that, for a stream whose first frames
+// all have one bit rate, from its size. A stream of varying rate with no
+// header would have to be read to its end to be measured, and is left unknown.
+static void probe_mp3(FILE *f, int64_t *ms) {
+	// Past the ID3v2 tags in front.
+	off_t start = 0;
+	for (int tags = 0; tags < 4; tags++) {
+		unsigned char id3[10];
+		if (fseeko(f, start, SEEK_SET) != 0 || fread(id3, 1, sizeof(id3), f) != sizeof(id3) ||
+			memcmp(id3, "ID3", 3) != 0) {
+			break;
+		}
+		start += 10 + (((off_t)(id3[6] & 0x7f) << 21) | ((off_t)(id3[7] & 0x7f) << 14) | ((off_t)(id3[8] & 0x7f) << 7) |
+					   (id3[9] & 0x7f)) +
+				 ((id3[5] & 0x10) ? 10 : 0);
+	}
+
+	unsigned char *buf = malloc(MP3_HEAD_BYTES);
+	size_t got = buf && fseeko(f, start, SEEK_SET) == 0 ? fread(buf, 1, MP3_HEAD_BYTES, f) : 0;
+
+	// The first header that is followed by another of the same sample rate.
+	int kbps = 0, rate = 0, samples = 0, bytes = 0, side = 0;
+	size_t at = 0;
+	bool found = false;
+	while (at + 4 <= got) {
+		int k, r, n, b, d;
+		if (mp3_header(buf + at, &kbps, &rate, &samples, &bytes, &side) &&
+			(at + (size_t)bytes + 4 > got || (mp3_header(buf + at + bytes, &k, &r, &n, &b, &d) && r == rate))) {
+			found = true;
+			break;
+		}
+		at++;
+	}
+	if (!found) {
+		free(buf);
+		return;
+	}
+
+	uint32_t frames = 0;
+	size_t tag = at + 4 + (size_t)side;
+	if (tag + 12 <= got && (memcmp(buf + tag, "Xing", 4) == 0 || memcmp(buf + tag, "Info", 4) == 0)) {
+		if (buf[tag + 7] & 1) {
+			frames = be32(buf + tag + 8);
+		}
+	} else if (at + 36 + 18 <= got && memcmp(buf + at + 36, "VBRI", 4) == 0) {
+		frames = be32(buf + at + 36 + 14);
+	}
+	if (frames > 0) {
+		*ms = (int64_t)((uint64_t)frames * (uint64_t)samples * 1000 / (uint64_t)rate);
+		free(buf);
+		return;
+	}
+
+	// No count: the frames in hand say whether the rate is constant.
+	bool uniform = true;
+	int walked = 0;
+	for (size_t p = at; p + 4 <= got; walked++) {
+		int k, r, n, b, d;
+		if (!mp3_header(buf + p, &k, &r, &n, &b, &d)) {
+			break;
+		}
+		uniform = uniform && k == kbps;
+		p += (size_t)b;
+	}
+	free(buf);
+	if (!uniform || walked < 2) {
+		return;
+	}
+
+	// The audio ends where the tags at the end begin: ID3v1, and an APEv2 tag
+	// in front of it.
+	off_t end = fseeko(f, 0, SEEK_END) == 0 ? ftello(f) : 0;
+	unsigned char tail[32];
+	if (end > 128 && fseeko(f, end - 128, SEEK_SET) == 0 && fread(tail, 1, 3, f) == 3 && memcmp(tail, "TAG", 3) == 0) {
+		end -= 128;
+	}
+	if (end > 32 && fseeko(f, end - 32, SEEK_SET) == 0 && fread(tail, 1, 32, f) == 32 &&
+		memcmp(tail, "APETAGEX", 8) == 0) {
+		off_t whole = (off_t)le32(tail + 12) + ((le32(tail + 20) & 0x80000000u) ? 32 : 0);
+		if (whole > 0 && whole < end) {
+			end -= whole;
+		}
+	}
+	if (end > start + (off_t)at) {
+		*ms = (int64_t)((end - start - (off_t)at) * 8 / kbps);
+	}
+}
+
+// How much of the end of an Ogg file is read to find its last page.
+#define OGG_TAIL_BYTES 65536
+
+// The length of an Ogg Vorbis or Opus file: the sample position its last page
+// carries, over the rate its first packet names. Two short reads, one at each
+// end of the file.
+static void probe_ogg(FILE *f, int64_t *ms) {
+	unsigned char head[64];
+	if (fread(head, 1, sizeof(head), f) != sizeof(head) || memcmp(head, "OggS", 4) != 0 || 27 + head[26] + 20 > 64) {
+		return;
+	}
+	const unsigned char *packet = head + 27 + head[26];
+	uint32_t serial = le32(head + 14);
+	uint64_t rate = 0;
+	uint64_t pre_skip = 0;
+	if (memcmp(packet, "OpusHead", 8) == 0) {
+		rate = 48000; // what an Opus position is always counted in
+		pre_skip = packet[10] | ((uint32_t)packet[11] << 8);
+	} else if (memcmp(packet, "\x01vorbis", 7) == 0) {
+		rate = le32(packet + 12);
+	}
+	off_t end = fseeko(f, 0, SEEK_END) == 0 ? ftello(f) : 0;
+	size_t want = end > OGG_TAIL_BYTES ? OGG_TAIL_BYTES : (size_t)end;
+	unsigned char *buf = rate > 0 && want >= 27 ? malloc(want) : NULL;
+	if (!buf || fseeko(f, end - (off_t)want, SEEK_SET) != 0 || fread(buf, 1, want, f) != want) {
+		free(buf);
+		return;
+	}
+	// Backwards to the last page of this stream that ends a packet: a page
+	// with none ending on it carries no position.
+	for (size_t i = want - 27 + 1; i-- > 0;) {
+		if (memcmp(buf + i, "OggS", 4) != 0 || le32(buf + i + 14) != serial) {
+			continue;
+		}
+		uint64_t position = le32(buf + i + 6) | ((uint64_t)le32(buf + i + 10) << 32);
+		if (position != UINT64_MAX && position > pre_skip) {
+			*ms = (int64_t)((position - pre_skip) * 1000 / rate);
+			break;
+		}
+	}
+	free(buf);
+}
+
+// The length of a file whose header the decoder reads at open and nothing
+// more: Monkey's Audio, WavPack, DSDIFF, AIFF and CAF. Not an MP3 or a raw AAC
+// under another name, which the decoder may read whole to measure.
+static void probe_by_decoder(const char *path, int64_t *ms) {
+	decode_format_t format = decode_detect_format(path);
+	if (format == DECODE_FORMAT_UNKNOWN || format == DECODE_FORMAT_MP3 || format == DECODE_FORMAT_AAC_ADTS) {
+		return;
+	}
+	decoder_t *dec = decoder_open_info(path, format);
+	if (!dec) {
+		return;
+	}
+	uint64_t frames = decoder_total_pcm_frames(dec);
+	int rate = decoder_sample_rate(dec);
+	decoder_close(dec);
+	if (rate > 0) {
+		*ms = (int64_t)(frames * 1000 / (uint64_t)rate);
+	}
 }
 
 // Fills the sample rate and bit depth of a file, or leaves them at zero when
 // they cannot be had cheaply. `alac` says the file is lossless MP4, which the
 // extension cannot say: a .m4a is AAC or ALAC and only the sample entry knows
 // which.
-static void probe_stream_format(const char *path, const char *filename, int *rate, int *bits, bool *alac) {
+//
+// And its length in milliseconds, 0 when that cannot be had without reading
+// the file through: from the same header where the format has been read from
+// it, from a short read at each end for MP3 and Ogg, and from the decoder's
+// own open for the formats whose header only it knows. A raw .aac has none.
+static void probe_stream_format(const char *path, const char *filename, int *rate, int *bits, bool *alac, int64_t *ms) {
 	*rate = 0;
 	*bits = 0;
 	*alac = false;
+	*ms = 0;
 
 	bool flac = has_extension(filename, ".flac");
 	bool wav = has_extension(filename, ".wav");
@@ -3520,6 +3897,7 @@ static void probe_stream_format(const char *path, const char *filename, int *rat
 			*rate = 0;
 			*bits = 0;
 		}
+		probe_by_decoder(path, ms);
 		return;
 	}
 	bool mp4 = has_extension(filename, ".m4a") || has_extension(filename, ".alac") || has_extension(filename, ".mp4");
@@ -3541,11 +3919,21 @@ static void probe_stream_format(const char *path, const char *filename, int *rat
 					*bits = cfg[5];
 				}
 			}
+			double seconds = mp4_duration_seconds(m);
+			if (seconds > 0) {
+				*ms = (int64_t)(seconds * 1000.0);
+			}
 			mp4_close(m);
 		}
 		return;
 	}
-	if (!flac && !wav && !dsf) {
+	bool mp3 = has_extension(filename, ".mp3");
+	bool ogg = has_extension(filename, ".ogg") || has_extension(filename, ".opus");
+	if (!flac && !wav && !dsf && !mp3 && !ogg) {
+		if (has_extension(filename, ".wv") || has_extension(filename, ".dff") || has_extension(filename, ".aif") ||
+			has_extension(filename, ".aiff") || has_extension(filename, ".aifc") || has_extension(filename, ".caf")) {
+			probe_by_decoder(path, ms);
+		}
 		return;
 	}
 
@@ -3554,13 +3942,39 @@ static void probe_stream_format(const char *path, const char *filename, int *rat
 		return;
 	}
 	if (flac) {
-		probe_flac(f, rate, bits);
+		probe_flac(f, rate, bits, ms);
 	} else if (wav) {
-		probe_wav(f, rate, bits);
+		probe_wav(f, rate, bits, ms);
+	} else if (dsf) {
+		probe_dsf(f, rate, bits, ms);
+	} else if (mp3) {
+		probe_mp3(f, ms);
 	} else {
-		probe_dsf(f, rate, bits);
+		probe_ogg(f, ms);
 	}
 	fclose(f);
+}
+
+// The length of the file at `path`, as the scan measures it; 0 when unknown.
+static int64_t file_length_ms(const char *path) {
+	const char *slash = strrchr(path, '/');
+	int rate = 0, bits = 0;
+	bool alac = false;
+	int64_t ms = 0;
+	probe_stream_format(path, slash ? slash + 1 : path, &rate, &bits, &alac, &ms);
+	return ms;
+}
+
+// Where track `index` of a sheet begins and ends in its audio, which is
+// `whole_ms` long: the last track runs to the end of the file. 0 and -1 when
+// the end is not known.
+static void sheet_span(const cue_sheet_t *cue, int64_t whole_ms, int index, int64_t *begin_ms, int64_t *end_ms) {
+	*begin_ms = (int64_t)cue->tracks[index].begin_ms;
+	*end_ms = cue->tracks[index].end_ms ? (int64_t)cue->tracks[index].end_ms : whole_ms;
+	if (*end_ms <= *begin_ms) {
+		*begin_ms = 0;
+		*end_ms = -1;
+	}
 }
 
 // Which format code the row records, matching the stock numbering where it has
@@ -4141,7 +4555,7 @@ static bool prepare_statements(void) {
 						   "(id,path,name,album,artist,genre,year,dis_id,ck_id,has_child_file,begin_time,end_time,"
 						   "cue_id,character,size,sample_rate,bit_rate,bit,channel,format,quality,album_pic_path,"
 						   "lrc_path,track_gain,track_peak,album_artist,ctime,mtime,sortkey,disc,album_key)"
-						   " VALUES(?,?,?,?,?,?,?,?,0,0,0,0,0,?,?,?,0,?,0,?,\'\',NULL,NULL,0,0,?,?,?,?,?,?)",
+						   " VALUES(?,?,?,?,?,?,?,?,0,0,?,?,0,?,?,?,0,?,0,?,\'\',NULL,NULL,0,0,?,?,?,?,?,?)",
 						   -1, &stmt_track, NULL) != SQLITE_OK) {
 		fprintf(stderr, "library: prepare failed: %s\n", sqlite3_errmsg(db));
 		return false;
@@ -4203,7 +4617,10 @@ static void lookup_names(sqlite3_stmt *lookup, sqlite3_stmt *link, const char *p
 	}
 }
 
-static void insert_track(const char *path, const char *filename, const song_metadata_t *tags, const struct stat *st) {
+// `begin_ms` and `end_ms` are where the track lies in its file, for a track of
+// a sheet; a negative `end_ms` is a file of its own, measured here.
+static void insert_track(const char *path, const char *filename, const song_metadata_t *tags, const struct stat *st,
+						 int64_t begin_ms, int64_t end_ms) {
 	if (!stmt_track) {
 		return;
 	}
@@ -4239,14 +4656,21 @@ static void insert_track(const char *path, const char *filename, const song_meta
 	sqlite3_bind_text(stmt_track, column++, tags->genre, -1, SQLITE_TRANSIENT);	 // genre
 	sqlite3_bind_int(stmt_track, column++, tags->year);							 // year
 	sqlite3_bind_int(stmt_track, column++, tags->track_number);					 // dis_id: track number
-	sqlite3_bind_text(stmt_track, column++, character, -1, SQLITE_TRANSIENT);	 // character
-	sqlite3_bind_int64(stmt_track, column++, (sqlite3_int64)st->st_size);		 // size
-
 	// The two the quality badge is worked out from. Zero when the container
-	// does not give them up cheaply -- see probe_stream_format().
+	// does not give them up cheaply -- see probe_stream_format(). The length
+	// comes from the same look at the file.
 	int rate = 0, bits = 0;
 	bool alac = false;
-	probe_stream_format(path, filename, &rate, &bits, &alac);
+	int64_t length_ms = 0;
+	probe_stream_format(path, filename, &rate, &bits, &alac, &length_ms);
+	if (end_ms < 0) {
+		begin_ms = 0;
+		end_ms = length_ms > 0 ? length_ms : -1; // -1: looked at, and not known
+	}
+	sqlite3_bind_int64(stmt_track, column++, (sqlite3_int64)begin_ms);			 // begin_time
+	sqlite3_bind_int64(stmt_track, column++, (sqlite3_int64)end_ms);			 // end_time
+	sqlite3_bind_text(stmt_track, column++, character, -1, SQLITE_TRANSIENT);	 // character
+	sqlite3_bind_int64(stmt_track, column++, (sqlite3_int64)st->st_size);		 // size
 	sqlite3_bind_int(stmt_track, column++, rate);									 // sample_rate
 	sqlite3_bind_int(stmt_track, column++, bits);									 // bit
 	sqlite3_bind_int(stmt_track, column++, alac ? FORMAT_ALAC : format_of(filename)); // format
@@ -4517,16 +4941,15 @@ static int album_join(char **albums, int count) {
 	int changed = 0;
 	for (int i = 0; i < count && !scan_cancel; i += 20) {
 		pthread_mutex_lock(&db_lock);
-		if (db && exec("BEGIN")) {
+		bool outer = false;
+		if (db && group_begin(&outer)) {
 			for (int j = i; j < count && j < i + 20; j++) {
 				int n = album_join_one(albums[j]);
 				if (n > 0) {
 					changed += n;
 				}
 			}
-			if (!exec("COMMIT")) {
-				exec("ROLLBACK");
-			}
+			group_end(outer, true);
 		}
 		pthread_mutex_unlock(&db_lock);
 	}
@@ -4554,14 +4977,16 @@ static bool is_video_file(const char *path, const char *name) {
 
 // Indexes one file: read the tags, write the row, commit every so often. Split
 // out of the walk, which has two phases with this sitting between them.
-static void scan_indexed(const char *path, const char *name, const song_metadata_t *tags, const struct stat *st) {
+static void scan_indexed(const char *path, const char *name, const song_metadata_t *tags, const struct stat *st,
+						 int64_t begin_ms, int64_t end_ms) {
 	pthread_mutex_lock(&db_lock);
 	if (db) {
-		insert_track(path, name, tags, st);
+		insert_track(path, name, tags, st, begin_ms, end_ms);
 		scan_found++;
 
 		if (scan_found % SCAN_COMMIT_EVERY == 0) {
-			bool ok = exec("COMMIT");
+			// A transaction that is already over has nothing left to commit.
+			bool ok = sqlite3_get_autocommit(db) || exec("COMMIT");
 			// Give the pages back rather than letting the cache grow to
 			// its limit and stay there for the rest of the scan.
 			if (db) {
@@ -4783,6 +5208,9 @@ static bool scan_cue_sheet(const char *path, const struct stat *st) {
 		return false;
 	}
 
+	// The last track runs to the end of the audio, which has to be measured.
+	int64_t whole_ms = file_length_ms(cue->audio_path);
+
 	for (int i = 0; i < cue->track_count; i++) {
 		const cue_track_t *t = &cue->tracks[i];
 
@@ -4797,18 +5225,20 @@ static bool scan_cue_sheet(const char *path, const struct stat *st) {
 		snprintf(tags.album_artist, sizeof(tags.album_artist), "%s", cue->performer);
 		snprintf(tags.genre, sizeof(tags.genre), "%s", cue->genre);
 		tags.year = cue->year;
-		tags.track_number = t->number;
+		tags.track_number = t->written;
 		tags.has_tags = tags.title[0] || tags.artist[0] || tags.album[0];
 
 		// The name shown when the sheet gave no title: better a track number
 		// than the sheet's file name repeated for every entry.
 		char shown[64];
 		if (!tags.title[0]) {
-			snprintf(shown, sizeof(shown), "%02d", t->number);
+			snprintf(shown, sizeof(shown), "%02d", t->written);
 			snprintf(tags.title, sizeof(tags.title), "%s", shown);
 		}
 
-		scan_indexed(vpath, tags.title, &tags, st);
+		int64_t begin_ms, end_ms;
+		sheet_span(cue, whole_ms, i, &begin_ms, &end_ms);
+		scan_indexed(vpath, tags.title, &tags, st, begin_ms, end_ms);
 	}
 
 	if (cue->track_count > 0) {
@@ -4899,7 +5329,9 @@ static bool scan_sacd_iso(const char *path, const struct stat *st) {
 		tags.track_number = i;
 		tags.has_tags = tags.title[0] || tags.artist[0] || tags.album[0];
 
-		scan_indexed(vpath, base_name, &tags, st);
+		// The track's length is in the disc's table of contents, in frames of
+		// a seventy-fifth of a second: nothing to measure.
+		scan_indexed(vpath, base_name, &tags, st, 0, (int64_t)t->frames * 1000 / 75);
 		indexed_count++;
 	}
 
@@ -4944,7 +5376,7 @@ static void scan_one_file(const char *child, const char *name, const struct stat
 
 	song_metadata_t tags;
 	metadata_read(child, &tags);
-	scan_indexed(child, name, &tags, st);
+	scan_indexed(child, name, &tags, st, 0, -1);
 }
 
 // One directory open at a time.
@@ -5253,7 +5685,7 @@ static void full_scan_run(void) {
 	bump_generation(GEN_MEDIA);
 	// Without the statements every insert is a silent no-op, and the scan
 	// would walk the whole card to produce an empty library.
-	if (!prepare_statements() || !exec("BEGIN")) {
+	if (!prepare_statements() || !scan_txn_begin()) {
 		fprintf(stderr, "library: cannot start the scan, the database is not writable\n");
 		scan_db_failed = true;
 		scan_cancel = true;
@@ -5265,11 +5697,7 @@ static void full_scan_run(void) {
 	}
 
 	pthread_mutex_lock(&db_lock);
-	if (scan_db_failed) {
-		exec("ROLLBACK"); // no-op when the BEGIN itself never took
-	} else {
-		exec("COMMIT");
-	}
+	scan_txn_end(!scan_db_failed);
 	finalize_statements();
 
 	if (cue_claimed_rows && !scan_db_failed) {
@@ -5934,7 +6362,8 @@ static void playlists_follow_library(void) {
 			}
 			sqlite3_finalize(stmt);
 		}
-		if (found > 0 && exec("BEGIN")) {
+		bool outer = false;
+		if (found > 0 && group_begin(&outer)) {
 			stmt = NULL;
 			bool ok = sqlite3_prepare_v2(db, write_sql, -1, &stmt, NULL) == SQLITE_OK;
 			for (int k = 0; k < found && ok; k++) {
@@ -5943,7 +6372,7 @@ static void playlists_follow_library(void) {
 				sqlite3_reset(stmt);
 			}
 			sqlite3_finalize(stmt);
-			exec(ok ? "COMMIT" : "ROLLBACK");
+			ok = group_end(outer, ok);
 			if (ok) {
 				hidden += found;
 				bump_generation(GEN_PLAYLISTS);
@@ -6240,7 +6669,9 @@ static int update_take_out(const walk_t *w) {
 
 	int removed = 0;
 	sqlite3_stmt *del = NULL;
-	if (exec("BEGIN") && sqlite3_prepare_v2(db, "DELETE FROM MEDIA_TABLE WHERE rowid = ?1", -1, &del, NULL) == SQLITE_OK) {
+	bool outer = false;
+	bool began = group_begin(&outer);
+	if (began && sqlite3_prepare_v2(db, "DELETE FROM MEDIA_TABLE WHERE rowid = ?1", -1, &del, NULL) == SQLITE_OK) {
 		for (int i = 0; i < w->gone.count; i++) {
 			sqlite3_bind_int64(del, 1, w->gone.ids[i]);
 			sqlite3_step(del);
@@ -6278,13 +6709,14 @@ static int update_take_out(const walk_t *w) {
 			sqlite3_finalize(folder);
 		}
 		prune_links();
-		if (!exec("COMMIT")) {
-			exec("ROLLBACK");
+		if (!group_end(outer, true)) {
 			removed = 0;
 		}
 	} else {
 		sqlite3_finalize(del);
-		exec("ROLLBACK");
+		if (began) {
+			group_end(outer, false);
+		}
 	}
 	pthread_mutex_unlock(&db_lock);
 
@@ -6420,6 +6852,122 @@ static int update_index(const namelist_t *files, bool replace) {
 	return replaced;
 }
 
+// ---------------------------------------------------------------------------
+// Lengths for an index written before they were kept
+//
+// Such rows have end_time 0. Detect changes measures them a slice at a time,
+// the way a scan would have, for a while at the end of each run: a large
+// library is filled in over a few runs, and a scan fills in everything at
+// once. A row that cannot be measured is written -1 and not asked again.
+// ---------------------------------------------------------------------------
+
+#define LENGTH_FILL_SLICE 64
+#define LENGTH_FILL_BUDGET_MS 20000
+
+static void lengths_fill(void) {
+	typedef struct {
+		sqlite3_int64 rowid;
+		int64_t begin_ms, end_ms;
+		char path[600];
+	} fill_row_t;
+	fill_row_t *slice = malloc(LENGTH_FILL_SLICE * sizeof(*slice));
+	cue_sheet_t *cue = malloc(sizeof(*cue));
+	if (!slice || !cue) {
+		free(slice);
+		free(cue);
+		return;
+	}
+
+	// The sheet in `cue`, with the length of its audio, kept from one track to
+	// the next: the rows of one sheet follow each other.
+	char sheet_held[600] = "";
+	bool sheet_ok = false;
+	int64_t whole_ms = 0;
+
+	uint32_t started_ms = now_ms();
+	sqlite3_int64 after = 0;
+	int filled = 0;
+	while (!scan_cancel && now_ms() - started_ms < LENGTH_FILL_BUDGET_MS) {
+		int n = 0;
+		pthread_mutex_lock(&db_lock);
+		sqlite3_stmt *stmt = NULL;
+		if (db && sqlite3_prepare_v2(db,
+									 "SELECT rowid, path FROM MEDIA_TABLE WHERE rowid > ?1"
+									 " AND (end_time IS NULL OR end_time = 0) ORDER BY rowid LIMIT ?2",
+									 -1, &stmt, NULL) == SQLITE_OK) {
+			sqlite3_bind_int64(stmt, 1, after);
+			sqlite3_bind_int(stmt, 2, LENGTH_FILL_SLICE);
+			while (n < LENGTH_FILL_SLICE && sqlite3_step(stmt) == SQLITE_ROW) {
+				const char *path = (const char *)sqlite3_column_text(stmt, 1);
+				slice[n].rowid = sqlite3_column_int64(stmt, 0);
+				snprintf(slice[n].path, sizeof(slice[n].path), "%s", path ? path : "");
+				n++;
+			}
+			sqlite3_finalize(stmt);
+		}
+		pthread_mutex_unlock(&db_lock);
+		if (n == 0) {
+			break;
+		}
+		after = slice[n - 1].rowid;
+
+		// The files are read with nothing locked.
+		for (int i = 0; i < n && !scan_cancel; i++) {
+			fill_row_t *r = &slice[i];
+			r->begin_ms = 0;
+			r->end_ms = -1;
+			char sheet[600];
+			int track = cue_split_path(r->path, sheet, sizeof(sheet));
+			if (track > 0) {
+				if (strcmp(sheet, sheet_held) != 0) {
+					snprintf(sheet_held, sizeof(sheet_held), "%s", sheet);
+					sheet_ok = cue_parse(sheet, cue);
+					whole_ms = sheet_ok ? file_length_ms(cue->audio_path) : 0;
+				}
+				if (sheet_ok && track <= cue->track_count) {
+					sheet_span(cue, whole_ms, track - 1, &r->begin_ms, &r->end_ms);
+				}
+			} else {
+				int64_t ms = file_length_ms(r->path);
+				if (ms > 0) {
+					r->end_ms = ms;
+				}
+			}
+		}
+		if (scan_cancel) {
+			break; // the rows not reached keep their 0, for the next run
+		}
+
+		pthread_mutex_lock(&db_lock);
+		bool outer = false;
+		if (db && group_begin(&outer)) {
+			stmt = NULL;
+			bool ok = sqlite3_prepare_v2(db,
+										 "UPDATE MEDIA_TABLE SET begin_time = ?1, end_time = ?2"
+										 " WHERE rowid = ?3 AND path = ?4",
+										 -1, &stmt, NULL) == SQLITE_OK;
+			for (int i = 0; i < n && ok; i++) {
+				sqlite3_bind_int64(stmt, 1, slice[i].begin_ms);
+				sqlite3_bind_int64(stmt, 2, slice[i].end_ms);
+				sqlite3_bind_int64(stmt, 3, slice[i].rowid);
+				sqlite3_bind_text(stmt, 4, slice[i].path, -1, SQLITE_STATIC);
+				ok = sqlite3_step(stmt) == SQLITE_DONE;
+				sqlite3_reset(stmt);
+			}
+			sqlite3_finalize(stmt);
+			if (group_end(outer, ok)) {
+				filled += n;
+			}
+		}
+		pthread_mutex_unlock(&db_lock);
+	}
+	free(slice);
+	free(cue);
+	if (filled > 0) {
+		printf("library: %d track length(s) measured in %u ms\n", filled, now_ms() - started_ms);
+	}
+}
+
 // How the last Detect changes run ended, told by the scan thread as its last
 // word (see scan_thread_func).
 static library_update_event_t update_outcome;
@@ -6474,7 +7022,7 @@ static void update_run(void) {
 			reading = true;
 
 			pthread_mutex_lock(&db_lock);
-			if (!exec("BEGIN")) {
+			if (!scan_txn_begin()) {
 				scan_db_failed = true;
 				scan_cancel = true;
 			}
@@ -6486,7 +7034,7 @@ static void update_run(void) {
 			}
 
 			pthread_mutex_lock(&db_lock);
-			exec(scan_db_failed ? "ROLLBACK" : "COMMIT");
+			scan_txn_end(!scan_db_failed);
 			pthread_mutex_unlock(&db_lock);
 		}
 
@@ -6496,12 +7044,14 @@ static void update_run(void) {
 		bool more = walk.full && !refused;
 		if (!more && !refused && !scan_cancel && !scan_db_failed) {
 			pthread_mutex_lock(&db_lock);
-			if (exec("BEGIN")) {
+			bool outer = false;
+			if (group_begin(&outer)) {
 				for (int i = 0; i < walk.note_count; i++) {
 					folder_mark(walk.notes[i].path, walk.notes[i].mtime, &walk.notes[i].sig);
 				}
-				exec("COMMIT");
-				folders_noted = walk.note_count;
+				if (group_end(outer, true)) {
+					folders_noted = walk.note_count;
+				}
 			}
 			pthread_mutex_unlock(&db_lock);
 		}
@@ -6509,6 +7059,10 @@ static void update_run(void) {
 		if (!more) {
 			break;
 		}
+	}
+
+	if (!scan_cancel && !scan_db_failed) {
+		lengths_fill();
 	}
 
 	bool changed = reading || removed > 0;
@@ -6592,7 +7146,9 @@ static void relink(const char *column, const char *link_table, sqlite3_stmt **lo
 	for (int i = 0; i < count && !scan_cancel; i += 50) {
 		pthread_mutex_lock(&db_lock);
 		sqlite3_stmt *link = NULL;
-		if (db && exec("BEGIN") && sqlite3_prepare_v2(db, insert_sql, -1, &link, NULL) == SQLITE_OK) {
+		bool outer = false;
+		bool began = db && group_begin(&outer);
+		if (began && sqlite3_prepare_v2(db, insert_sql, -1, &link, NULL) == SQLITE_OK) {
 			for (int j = i; j < count && j < i + 50; j++) {
 				int n = split_names(values[j], separators, exceptions, exception_count, names, SPLIT_MAX);
 				if (n == 0) {
@@ -6608,9 +7164,9 @@ static void relink(const char *column, const char *link_table, sqlite3_stmt **lo
 				}
 			}
 			sqlite3_finalize(link);
-			if (!exec("COMMIT")) {
-				exec("ROLLBACK");
-			}
+		}
+		if (began) {
+			group_end(outer, true);
 		}
 		pthread_mutex_unlock(&db_lock);
 	}
@@ -6623,7 +7179,8 @@ static void relink(const char *column, const char *link_table, sqlite3_stmt **lo
 static bool reorganize_run(void) {
 	uint32_t started_ms = now_ms();
 	pthread_mutex_lock(&db_lock);
-	bool ready = db && prepare_statements() && exec("BEGIN");
+	bool outer = false;
+	bool ready = db && prepare_statements() && group_begin(&outer);
 	if (ready) {
 		exec("DELETE FROM ARTIST_LINK");
 		exec("DELETE FROM ALBUM_ARTIST_LINK");
@@ -6631,10 +7188,7 @@ static bool reorganize_run(void) {
 		exec("DELETE FROM ARTIST_TABLE");
 		exec("DELETE FROM ALBUM_ARTIST_TABLE");
 		exec("DELETE FROM GENRE_TABLE");
-		ready = exec("COMMIT");
-		if (!ready) {
-			exec("ROLLBACK");
-		}
+		ready = group_end(outer, true);
 	}
 	pthread_mutex_unlock(&db_lock);
 
@@ -7388,13 +7942,21 @@ int library_playlist_rows(const char *name, library_playlist_row_t **rows_out) {
 //
 // A transaction that will not start -- a scan has one open, and this connection
 // allows one at a time -- is not a failure: the rows go in one at a time
-// instead, which is slower and just as correct.
+// instead, which is slower and just as correct. A scan that starts while the
+// write is under way takes the transaction over (scan_txn_begin). Either way
+// there is then nothing to roll back to, and a write that fails takes its own
+// rows out again instead.
 // ---------------------------------------------------------------------------
 
 struct library_playlist_writer {
 	sqlite3_stmt *stmt;
 	bool failed;
 	bool owns_transaction;
+	unsigned epoch;			 // txn_epoch when the transaction was begun
+	unsigned serial;		 // db_serial then: the database the rows went into
+	bool created;			 // the playlist was not there before
+	sqlite3_int64 last_idx; // the highest idx it held then
+	char quoted[PLAYLIST_TABLE_MAX];
 };
 
 library_playlist_writer_t *library_playlist_write_begin(const char *name) {
@@ -7411,12 +7973,25 @@ library_playlist_writer_t *library_playlist_write_begin(const char *name) {
 	snprintf(sql, sizeof(sql), "INSERT INTO %s(path,title,artist,seconds,present) VALUES(?,?,?,?,?)", quoted);
 
 	pthread_mutex_lock(&db_lock);
+	writer->created = db && !playlist_table_exists_locked(name);
 	if (!db || !playlist_create_locked(quoted) || sqlite3_prepare_v2(db, sql, -1, &writer->stmt, NULL) != SQLITE_OK) {
 		pthread_mutex_unlock(&db_lock);
 		free(writer);
 		return NULL;
 	}
-	writer->owns_transaction = exec_quiet("BEGIN");
+	snprintf(writer->quoted, sizeof(writer->quoted), "%s", quoted);
+	char max_sql[PLAYLIST_TABLE_MAX + 48];
+	snprintf(max_sql, sizeof(max_sql), "SELECT IFNULL(MAX(idx),0) FROM %s", quoted);
+	sqlite3_stmt *max_stmt = NULL;
+	if (sqlite3_prepare_v2(db, max_sql, -1, &max_stmt, NULL) == SQLITE_OK) {
+		if (sqlite3_step(max_stmt) == SQLITE_ROW) {
+			writer->last_idx = sqlite3_column_int64(max_stmt, 0);
+		}
+		sqlite3_finalize(max_stmt);
+	}
+	writer->owns_transaction = sqlite3_get_autocommit(db) && exec_quiet("BEGIN");
+	writer->epoch = txn_epoch;
+	writer->serial = db_serial;
 	pthread_mutex_unlock(&db_lock);
 	return writer;
 }
@@ -7448,13 +8023,32 @@ bool library_playlist_write_end(library_playlist_writer_t *writer, bool keep) {
 	bool ok = keep && !writer->failed;
 	pthread_mutex_lock(&db_lock);
 	sqlite3_finalize(writer->stmt);
-	if (writer->owns_transaction) {
-		exec(ok ? "COMMIT" : "ROLLBACK");
-	} else if (!ok) {
-		// Nothing to roll back to, since every row went in on its own. The
-		// half-written playlist is dropped instead, which is what a rollback
-		// would have left behind.
-		ok = false;
+	// Still the transaction begun in library_playlist_write_begin(): no scan
+	// has taken it over and the connection is the same one.
+	bool same_db = db && writer->serial == db_serial;
+	bool own = same_db && writer->owns_transaction && writer->epoch == txn_epoch && !sqlite3_get_autocommit(db);
+	bool broken = writer->failed;
+	if (own) {
+		if (ok && !exec("COMMIT")) {
+			ok = false;
+			broken = true;
+		}
+		if (!ok) {
+			exec("ROLLBACK");
+		}
+	}
+	if (!ok && same_db) {
+		// What a rollback leaves behind, for the rows that went in outside a
+		// transaction of the writer's own: the rows written here go. A playlist
+		// made for a write that then failed goes with them, since the table was
+		// made before any transaction began.
+		char sql[PLAYLIST_TABLE_MAX + 64];
+		if (writer->created && broken) {
+			snprintf(sql, sizeof(sql), "DROP TABLE IF EXISTS %s", writer->quoted);
+		} else {
+			snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE idx > %lld", writer->quoted, (long long)writer->last_idx);
+		}
+		exec(sql);
 	}
 	bump_generation(GEN_PLAYLISTS);
 	pthread_mutex_unlock(&db_lock);
@@ -7537,7 +8131,8 @@ bool library_playlist_move(const char *name, int from, int to) {
 	ok = keys != NULL && got == span;
 
 	if (ok) {
-		exec("BEGIN");
+		bool outer = false;
+		group_begin(&outer);
 		sqlite3_stmt *stmt = NULL;
 		ok = sqlite3_prepare_v2(db, write_sql, -1, &stmt, NULL) == SQLITE_OK;
 
@@ -7579,7 +8174,7 @@ bool library_playlist_move(const char *name, int from, int to) {
 		}
 
 		sqlite3_finalize(stmt);
-		exec(ok ? "COMMIT" : "ROLLBACK");
+		ok = group_end(outer, ok);
 		if (ok) {
 			bump_generation(GEN_PLAYLISTS);
 		}
@@ -7676,7 +8271,8 @@ int library_playlist_remove_positions(const char *name, const int *positions, in
 			sqlite3_finalize(stmt);
 		}
 
-		exec("BEGIN");
+		bool outer = false;
+		group_begin(&outer);
 		bool ok = sqlite3_prepare_v2(db, delete_sql, -1, &stmt, NULL) == SQLITE_OK;
 		for (int i = 0; i < found && ok; i++) {
 			sqlite3_bind_int64(stmt, 1, keys[i]);
@@ -7685,8 +8281,7 @@ int library_playlist_remove_positions(const char *name, const int *positions, in
 			sqlite3_reset(stmt);
 		}
 		sqlite3_finalize(stmt);
-		exec(ok ? "COMMIT" : "ROLLBACK");
-		if (!ok) {
+		if (!group_end(outer, ok)) {
 			removed = 0;
 		}
 		if (removed > 0) {
@@ -7854,7 +8449,9 @@ void library_queue_save(const char *const *paths, int count, int current_index, 
 		return;
 	}
 
-	sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+	// A savepoint, as in library_queue_save_query() and for the same reason.
+	bool outer = false;
+	group_begin(&outer);
 	sqlite3_exec(db, "DELETE FROM PLAYBACK_QUEUE", NULL, NULL, NULL);
 	// The two forms are exclusive: a queue written out as rows has to retire
 	// whichever query was standing, or the next boot would restore that instead
@@ -7887,7 +8484,7 @@ void library_queue_save(const char *const *paths, int count, int current_index, 
 		sqlite3_finalize(stmt);
 	}
 
-	sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+	group_end(outer, true);
 	pthread_mutex_unlock(&db_lock);
 }
 

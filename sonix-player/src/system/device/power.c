@@ -22,6 +22,7 @@
 #include "src/system/library/audiobookdb.h"
 #include "src/system/device/clock.h"
 #include "src/system/playback/device_state.h"
+#include "src/system/playback/sleeptimer.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/remote/sonixlink.h"
 #include "src/system/streaming/qobuzcache.h"
@@ -42,6 +43,7 @@
 #include "src/system/device/usb.h"
 #include "src/system/audio/usbdac.h"
 #include "src/system/gearboy/gearboy.h"
+#include "src/system/video/video.h"
 #include "src/system/audio/metronome.h"
 #include "src/system/device/led.h"
 #include "src/system/device/sysinfo.h"
@@ -359,6 +361,14 @@ static void find_charge_node(void) {
 	}
 	searched = true;
 
+	// A player charged by its PMIC has no MP2731 and no such node: its limit
+	// is axpcharge's to keep, and saying here that it cannot be enforced
+	// would be saying it of the wrong charger.
+	const sysinfo_model_t *model = sysinfo_model();
+	if (model && model->pmic_charger) {
+		return;
+	}
+
 	if (access(STEP_CHARGING_NODE, W_OK) != 0) {
 		printf("power: %s is not writable; the charge limit cannot be enforced\n", STEP_CHARGING_NODE);
 		return;
@@ -399,6 +409,22 @@ void power_charging_release(void) {
 	}
 	charger_run(true);
 	g_charging_suspended = false;
+}
+
+// The same, for the crash handler: one open, one write and one close on the
+// node power_init() resolved, which is all a signal handler may call.
+void power_charging_release_from_signal(void) {
+	const char *node = g_charge_node;
+	if (!node) {
+		return;
+	}
+	int fd = open(node, O_WRONLY);
+	if (fd < 0) {
+		return;
+	}
+	ssize_t ignored = write(fd, "1", 1);
+	(void)ignored;
+	close(fd);
 }
 
 void power_set_charge_limit(int percent) {
@@ -475,6 +501,10 @@ static void apply_charge_limit(void) {
 	g_charging_suspended = !allow;
 	printf("power: charging %s\n", allow ? "on" : g_driver_limit ? "off" : "held off at the limit");
 }
+
+// The limit's decision alone, for the charging screen, which runs before the
+// interface and its tick exist.
+void power_charge_limit_tick(void) { apply_charge_limit(); }
 
 // Forbids or allows charging outright, on top of whatever the percentage limit
 // is doing. DAC mode is the one caller: the choice is the user's and the
@@ -694,6 +724,7 @@ static bool player_is_busy(bool playing, uint32_t input_idle) {
 		   usbdac_is_active() ||				   // a computer feeding the DAC
 		   usb_storage_active() ||				   // the card exported over USB
 		   gearboy_running() ||					   // the emulator
+		   video_running() ||					   // a film
 		   library_scan_running() ||			   // a scan, which is also writing to the card
 		   audiobookdb_scan_running() || wifitransfer_running() || dlna_running() || airplay_running() ||
 		   sonixlink_is_connected() || // a phone driving the player, not a switch left on
@@ -997,10 +1028,11 @@ static void rtc_alarm_arm(void) {
 	}
 	bool battery_first = battery_s > 0 && (auto_off_s == 0 || battery_s < auto_off_s);
 	long remaining_s = battery_first ? battery_s : auto_off_s;
-	// The absolute time in epoch seconds, which is how the RTC keeps it.
+	// Relative to the RTC's own time ("+N"): the system clock is not kept in
+	// step with the RTC (see clock.c), and an absolute time taken from it can
+	// land years away from where the RTC stands.
 	char buf[32];
-	time_t at = time(NULL) + remaining_s;
-	snprintf(buf, sizeof(buf), "%lld", (long long)at);
+	snprintf(buf, sizeof(buf), "+%ld", remaining_s);
 	if (!rtc_wakealarm_write(buf)) {
 		return;
 	}
@@ -1289,6 +1321,12 @@ static void suspend_if_idle(uint32_t now, bool playing) {
 	// remembered position: that sits in RAM, and RAM is preserved.
 	if (wifi_in_use()) {
 		mem_skip("something is using the network");
+		return;
+	}
+	// A scan is work in progress on the card, which loses its power in the
+	// suspend: it runs to its end first.
+	if (library_scan_running() || audiobookdb_scan_running()) {
+		mem_skip("a library scan is running");
 		return;
 	}
 	// Busy first, so the log tells the truth: bluetooth_in_use() counts a job in
@@ -1815,6 +1853,9 @@ void power_notify_activity(void) {
 	pthread_mutex_lock(&g_lock);
 	g_last_button_activity_ms = lv_tick_get();
 	pthread_mutex_unlock(&g_lock);
+	// Whoever pressed a button is not asleep: an automatic sleep timer starts
+	// its countdown again.
+	sleeptimer_note_activity();
 }
 
 // On the UI thread: the press is taken now rather than at the timer's next
@@ -1934,6 +1975,9 @@ void power_init(const power_config_t *cfg, lv_display_t *disp) {
 
 	// discover the panel's maximum backlight level
 	g_max_brightness = g_cfg.max_brightness_path ? read_long_from_file(g_cfg.max_brightness_path) : -1;
+
+	// The charger's node, looked for now: the crash handler cannot search for it.
+	find_charge_node();
 
 	// if no explicit on-brightness was configured, adopt whatever the panel is
 	// currently set to (falling back to max). Never adopt a too-dim value: a

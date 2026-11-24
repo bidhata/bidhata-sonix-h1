@@ -25,6 +25,7 @@ static const struct {
 	const char *label;
 } AUTO_OFF[] = {
 	{15, "power_15_minutes"}, {30, "power_30_minutes"}, {60, "power_1_hour"}, {120, "power_2_hours"}, {180, "power_3_hours"}, {360, "power_6_hours"},
+	{720, "power_12_hours"}, {1440, "power_24_hours"}, {2880, "power_48_hours"},
 };
 #define AUTO_OFF_COUNT ((int)(sizeof(AUTO_OFF) / sizeof(AUTO_OFF[0])))
 

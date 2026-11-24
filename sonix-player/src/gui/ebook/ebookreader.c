@@ -555,8 +555,12 @@ static uint32_t chars_that_fit(lv_obj_t *parent, const ebook_block_t *b, uint32_
 			// after any kana or kanji, which have no spaces between them -- and
 			// never inside a character's bytes.
 			uint32_t within = from + low - seen;
+			// Where this page begins inside the span. The search stops there:
+			// a break found before it belongs to the page before, and taking it
+			// would put the cut behind the start of this one.
+			uint32_t floor = from > seen ? from - seen : 0;
 			const unsigned char *t = (const unsigned char *)pool + sp->offset;
-			for (uint32_t k = within; k > 0; k--) {
+			for (uint32_t k = within; k > floor; k--) {
 				if (t[k - 1] == ' ' || t[k - 1] == '\n') {
 					return low - (within - k);
 				}
@@ -572,7 +576,7 @@ static uint32_t chars_that_fit(lv_obj_t *parent, const ebook_block_t *b, uint32_
 				}
 			}
 			// No place to break: at least not inside a character.
-			while (within > 0 && within < sp->length && (t[within] & 0xC0u) == 0x80u) {
+			while (within > floor && within < sp->length && (t[within] & 0xC0u) == 0x80u) {
 				within--;
 				low--;
 			}

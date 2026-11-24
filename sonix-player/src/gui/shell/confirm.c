@@ -33,6 +33,8 @@ void confirm_close(void) {
 	}
 }
 
+bool confirm_question_open(void) { return veil && !lv_obj_is_hidden(veil) && pending_action; }
+
 // The action runs one tick after the card is down, so a callback that loads
 // another screen never does it from under the dialog it was opened by.
 static void run_pending_cb(void *unused) {

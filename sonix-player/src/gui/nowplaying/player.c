@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "src/gui/library/browser.h"
 #include "src/gui/library/audiobookextras.h"
@@ -22,6 +23,7 @@
 #include "src/gui/shell/quickpanel.h"
 #include "src/gui/shell/scrolltext.h"
 #include "src/gui/nowplaying/trackmenu.h"
+#include "src/gui/nowplaying/vumeter.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/toast.h"
@@ -116,6 +118,7 @@ static void bar_over_player_update(void);
 static double progress_anchor_secs;
 static uint32_t progress_anchor_tick;
 static bool progress_running;
+static void vu_sync(void);
 
 // The smoothing runs only while there is a bar moving on a sheet that can be
 // seen: sixteen wake-ups a second for a panel that is closed or dark are pure
@@ -748,7 +751,17 @@ static void apply_playback_status(audio_status_t status) {
 	// in step with the engine -- so it is the one place the sleep timers can be
 	// told without being told twice. It is also the one place that knows what
 	// is playing well enough to say which of the three it belongs to.
-	sleeptimer_note_playing(playing ? sleeptimer_kind_playing() : SLEEPTIMER_COUNT);
+	//
+	// A STOPPED that is the gap between two tracks is not told: naming no kind
+	// starts the countdown afresh at the next track, and a stretch that began
+	// again at every track would never run out. The gap is the settling window
+	// above, and for as long as it takes on a queue that lives on a phone,
+	// where the next track is sent and downloaded first. A pause, and a stop
+	// that has settled, are told as they are.
+	bool handover = status == AUDIO_STATUS_STOPPED && (settling || dlna_owns_playback());
+	if (!handover) {
+		sleeptimer_note_playing(playing ? sleeptimer_kind_playing() : SLEEPTIMER_COUNT);
+	}
 	if (sleep_timer) {
 		if (sleeptimer_any_running()) {
 			lv_timer_resume(sleep_timer);
@@ -874,7 +887,11 @@ static void set_progress_label(double current_secs, double total_secs) {
 	view_update(current_secs, total_secs);
 	double shown = 0;
 	if (view_length > 0) {
-		lv_slider_set_value(progress_slider, view_value(current_secs), LV_ANIM_OFF);
+		// Not under a finger: a track change wakes the poll in the middle of a
+		// drag, and the knob is the finger's until it lifts.
+		if (!lv_obj_has_state(progress_slider, LV_STATE_PRESSED)) {
+			lv_slider_set_value(progress_slider, view_value(current_secs), LV_ANIM_OFF);
+		}
 		shown = current_secs - view_start;
 		if (shown < 0) {
 			shown = 0;
@@ -1135,6 +1152,7 @@ static void paint_transport_tint(void) {
 		lv_obj_set_style_bg_color(progress_slider, chrome_accent(), LV_PART_KNOB);
 	}
 	lyrics_repaint_lit(); // the sung line wears it too
+	vumeter_set_color(chrome_accent()); // and the meter's bars
 }
 
 // Hides the artist's pill when there is no artist. An empty pill is a blank
@@ -1801,6 +1819,78 @@ static void lyrics_find_sync(bool full) {
 	lv_obj_move_foreground(lyrics_find_btn);
 }
 
+// ---------------------------------------------------------------------------
+// The level meter (vumeter.h)
+//
+// Over the foot of the sleeve, in the two arrangements that leave it free:
+// Standard, and Studio on its smaller sleeve. The arrangement with the shape of
+// the track keeps its pills and its star there, and has no meter. Nor has the
+// page of words, which takes the sleeve's place.
+//
+// It runs only while it can be seen: the setting on, the player the page on
+// show, the panel lit. Asked again wherever one of those changes and by every
+// poll, which is how it stops with the screen and comes back after a wake.
+// ---------------------------------------------------------------------------
+
+#define VU_INSET 14 // what it keeps to the sides and the foot of the sleeve
+
+static bool vu_enabled;
+
+static void vu_sync(void) {
+	bool room = !layout_alt_now && lyrics_progress == 0;
+	vumeter_show(vu_enabled && room && sheet_open && power_screen_is_on());
+}
+
+bool player_vu_meter(void) { return vu_enabled; }
+
+void player_vu_meter_set(bool on) {
+	if (on == vu_enabled) {
+		return;
+	}
+	vu_enabled = on;
+	config_set_bool("screen", "vu_meter", on);
+	config_save();
+	vu_sync();
+}
+
+int player_vu_style(void) { return (int)vumeter_style(); }
+
+void player_vu_style_set(int style) {
+	if (style < 0 || style >= VUMETER_STYLES || style == (int)vumeter_style()) {
+		return;
+	}
+	vumeter_set_style((vumeter_style_t)style);
+	config_set_int("screen", "vu_style", style);
+	config_save();
+}
+
+// A tap on the meter is "the next shape". The meter takes no press of its own
+// (the sleeve under it is what the sheet and the page of words are pulled by),
+// so the sleeve's click is looked at here: where the finger went down, where
+// it came up, and whether either pull took it.
+#define VU_TAP_SLOP 12
+
+static bool lyrics_swiped; // defined with the page of words, further down
+
+static void vu_tap_cb(lv_event_t *e) {
+	static lv_point_t down;
+	lv_indev_t *indev = lv_indev_active();
+	if (!indev) {
+		return;
+	}
+	if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
+		lv_indev_get_point(indev, &down);
+		return;
+	}
+	lv_point_t up;
+	lv_indev_get_point(indev, &up);
+	if (lyrics_swiped || player_sheet_drag_active() || LV_ABS(up.x - down.x) > VU_TAP_SLOP ||
+		LV_ABS(up.y - down.y) > VU_TAP_SLOP || !vumeter_hit(&down) || !vumeter_hit(&up)) {
+		return;
+	}
+	player_vu_style_set(((int)vumeter_style() + 1) % VUMETER_STYLES);
+}
+
 // Everything the swipe moves, at `progress` of the way from the sleeve (0)
 // to the words (LYRICS_FULL). Only positions change from one frame to the
 // next; at 0 every style touched is handed back, so the arrangement is
@@ -1816,6 +1906,7 @@ static void lyrics_progress_apply(int32_t progress) {
 		progress = LYRICS_FULL;
 	}
 	lyrics_progress = progress;
+	vu_sync(); // the words take the meter's place
 	lyrics_find_sync(progress == LYRICS_FULL);
 	bool rest = progress == 0;
 	int32_t travel = cover_box_w - lyrics_pane_x;
@@ -2066,9 +2157,18 @@ static void lyrics_fetched(void *user) {
 static void *lyrics_fetch_worker(void *arg) {
 	lyrics_fetch_t *job = arg;
 	job->result = lrclib_search(job->title, job->artist, job->album, job->duration, &job->records, &job->count);
-	if (!gui_post(lyrics_fetched, job)) {
+	// A full queue empties within a pass or two of the interface, so the answer
+	// is offered again for a while before it is given up: lyrics_fetched() is
+	// what lets the next search start.
+	bool posted = gui_post(lyrics_fetched, job);
+	for (int i = 0; !posted && i < 50; i++) {
+		usleep(100 * 1000);
+		posted = gui_post(lyrics_fetched, job);
+	}
+	if (!posted) {
 		lrclib_free(job->records, job->count);
 		free(job);
+		lyrics_fetching = false;
 	}
 	return NULL;
 }
@@ -2658,6 +2758,9 @@ static void studio_place(void) {
 	lv_obj_set_size(studio_quality, size, STUDIO_QUALITY_H);
 	lv_obj_set_pos(studio_quality, cover_x, cover_y + size + STUDIO_QUALITY_GAP);
 
+	// The meter over the foot of this arrangement's sleeve.
+	vumeter_place(studio_box, cover_x + VU_INSET, cover_y + size - VU_INSET, size - 2 * VU_INSET);
+
 	lyrics_layout();
 }
 
@@ -3001,12 +3104,16 @@ static void apply_layout(void) {
 	if (layout_studio_now) {
 		studio_put();
 	} else {
+		// The meter over the foot of the sleeve at full width; studio_place()
+		// puts it on Studio's.
+		vumeter_place(cover_panel, VU_INSET, cover_box_h - VU_INSET, cover_box_w - 2 * VU_INSET);
 		lyrics_layout(); // studio_put() places the page itself
 	}
 	align_title_with_star(); // the title may have just left its row, or come back to it
 
 	paint_alt_tint();
 	bar_over_player_update(); // Studio's bar blurs nothing of its own
+	vu_sync();
 }
 
 // Decides which arrangement the thing now playing gets, and moves the pieces
@@ -3514,10 +3621,12 @@ static void player_refresh_theme(void) {
 	set_over_cover(chrome_over_cover); // repaints the play disc for the new palette
 	update_repeat_button();
 	update_speed_button();
+	vumeter_set_color(chrome_accent());
 
 	device_state_t state;
 	device_state_get(&state);
-	refresh_cover(state.current_file);
+	// A station has no file: its artwork is its icon, as in refresh_now_playing().
+	refresh_cover(state.live ? state.live_cover : state.current_file);
 	if (lyrics_pane) {
 		lyrics_look(lyrics_look_on); // the words in the new theme's colours
 	}
@@ -3869,7 +3978,8 @@ static void fav_btn_event_cb(lv_event_t *e) {
 		return;
 	}
 
-	const char *title = state.metadata.title[0] ? state.metadata.title : strrchr(state.current_file, '/') + 1;
+	const char *slash = strrchr(state.current_file, '/');
+	const char *title = state.metadata.title[0] ? state.metadata.title : (slash ? slash + 1 : state.current_file);
 	// No notification popup: the star filling in is the whole feedback.
 	library_fav_toggle(state.current_file, title, state.metadata.artist);
 	update_fav_button();
@@ -4191,6 +4301,7 @@ static void update_progress(void) {
 	progress_anchor_tick = lv_tick_get();
 	progress_running = state.status == AUDIO_STATUS_PLAYING && state.progress_total_secs > 0;
 	smooth_timer_sync();
+	vu_sync();
 
 	set_progress_label(state.progress_current_secs, current_total_length);
 	wave_refresh(cover_shown_path, state.progress_current_secs);
@@ -4310,6 +4421,17 @@ void player_screen_prev(void) {
 	device_state_t state;
 	device_state_get(&state);
 
+	// A track from DLNA has its queue on the phone, as for the side keys
+	// (player_key_prev): back to the start, or the phone is asked.
+	if (dlna_owns_playback()) {
+		if (state.progress_current_secs > 3.0) {
+			device_state_seek(0);
+		} else {
+			dlna_request_prev();
+		}
+		return;
+	}
+
 	// On a book these two are not "previous chapter" and "next chapter": they
 	// are ten seconds back and ten seconds on, which is what somebody who
 	// missed a sentence reaches for. Chapters have their own list.
@@ -4336,6 +4458,12 @@ void player_screen_prev(void) {
 
 void player_screen_next(void) {
 	if (live_step(1)) {
+		return;
+	}
+
+	// As for the side keys (player_key_next): the queue is the phone's.
+	if (dlna_owns_playback()) {
+		dlna_request_next();
 		return;
 	}
 
@@ -4512,10 +4640,20 @@ static void progress_slider_event_cb(lv_event_t *e) {
 
 		int value = lv_slider_get_value(progress_slider);
 
-		double seconds = view_seconds(value);
+		// With no length known the bar stands for nothing, and every place on
+		// it would be the start of the track.
+		if (view_length > 0) {
+			double seconds = view_seconds(value);
 
-		device_state_seek(seconds);
+			device_state_seek(seconds);
+		}
 
+		lv_timer_resume(progress_slider_timer);
+	}
+
+	// A press taken away rather than let go: no seek, and the poll runs again
+	// (it brings the smoothing back by itself).
+	if (code == LV_EVENT_PRESS_LOST) {
 		lv_timer_resume(progress_slider_timer);
 	}
 
@@ -4561,7 +4699,7 @@ static void smooth_timer_cb(lv_timer_t *timer) {
 	}
 
 	int value = view_value(seconds);
-	if (value != lv_slider_get_value(progress_slider)) {
+	if (value != lv_slider_get_value(progress_slider) && !lv_obj_has_state(progress_slider, LV_STATE_PRESSED)) {
 		lv_slider_set_value(progress_slider, value, LV_ANIM_OFF);
 	}
 	wave_preview(seconds);
@@ -4651,11 +4789,18 @@ void player_output_unplugged(const char *what) {
 // of falling asleep to something is finding it where it was in the morning.
 static void sleep_timer_cb(lv_timer_t *timer) {
 	(void)timer;
+	// Asked only while something plays: the answer is given once, and one given
+	// in the gap between two tracks would be spent with nothing to pause. The
+	// countdown is against the clock, so the next tick with music finds it run
+	// out all the same.
+	if (audio_get_status() != AUDIO_STATUS_PLAYING) {
+		return;
+	}
 	bool expired = false;
 	for (int i = 0; i < SLEEPTIMER_COUNT; i++) {
 		expired = sleeptimer_expired((sleeptimer_kind_t)i) || expired;
 	}
-	if (!expired || audio_get_status() != AUDIO_STATUS_PLAYING) {
+	if (!expired) {
 		return;
 	}
 
@@ -4847,6 +4992,7 @@ void player_sheet_open(bool animate) {
 	}
 	sheet_open = true;
 	smooth_timer_sync();
+	vu_sync();
 	back_btn_player_mode(true);
 	lyrics_screen_hold_update();
 
@@ -4884,6 +5030,7 @@ void player_sheet_close(bool animate) {
 	bool was_open = sheet_open;
 	sheet_open = false;
 	smooth_timer_sync();
+	vu_sync();
 	back_btn_player_mode(false);
 	lyrics_screen_hold_update();
 	topbar_set_over_artwork(false, false);
@@ -5574,6 +5721,11 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_center(cover_img);
 	lv_obj_set_hidden(cover_img, true);
 
+	// The level meter, over the picture. apply_layout() says where.
+	vumeter_create(cover_panel);
+	lv_obj_add_event_cb(cover_panel, vu_tap_cb, LV_EVENT_PRESSED, NULL);
+	lv_obj_add_event_cb(cover_panel, vu_tap_cb, LV_EVENT_CLICKED, NULL);
+
 	// ---------------------------------------------------------------------
 	// Studio: the blurred sleeve behind the whole screen, and everything else
 	// laid out over it.
@@ -5700,6 +5852,8 @@ void player_init(gui_config_t *cfg) {
 					: (saved == (int)PLAYER_LAYOUT_STUDIO)		? PLAYER_LAYOUT_STUDIO
 																: PLAYER_LAYOUT_STANDARD;
 	cover_accent = config_get_bool("screen", "cover_accent", false);
+	vu_enabled = config_get_bool("screen", "vu_meter", false);
+	vumeter_set_style((vumeter_style_t)config_get_int("screen", "vu_style", VUMETER_BARS));
 	layout_alt_now = false; // apply_layout() below puts the standard one up first
 	layout_studio_now = false;
 	apply_layout();

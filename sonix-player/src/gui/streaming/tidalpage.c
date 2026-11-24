@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <malloc.h>
+#include <unistd.h>
 
 #include "src/gui/shell/confirm.h"
 #include "src/gui/fonts/fonts.h"
@@ -285,8 +286,15 @@ static row_menu_t row_menu_kind(job_kind_t kind) {
 	}
 }
 
-// The row the menu was opened on. Only one: the menu is modal.
-static int menu_index = -1;
+// What the menu was opened on. Only one: the menu is modal.
+//
+// The entry's own id and name, copied when the menu opens, and not its row
+// number: a question is still on screen when a reload started by an earlier
+// removal redraws the list, and the same row number then names another entry.
+static long menu_track_id;
+static char menu_album_id[TIDAL_ID_MAX];
+static char menu_playlist_id[TIDAL_ID_MAX];
+static char menu_name[TIDAL_TITLE_MAX];
 
 static char sync_message[192];
 
@@ -337,77 +345,73 @@ static void row_added_done(bool ok, const char *error, void *user) {
 
 static void do_track_add(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (menu_track_id == 0) {
 		return;
 	}
-	long id = result_tracks[menu_index].id;
-	tidalsync_favorite_toggle(id, true, row_added_done, NULL);
+	tidalsync_favorite_toggle(menu_track_id, true, row_added_done, NULL);
 }
 
 static void do_track_remove(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (menu_track_id == 0) {
 		return;
 	}
-	tidalsync_favorite_toggle(result_tracks[menu_index].id, false, row_sync_done, (void *)(intptr_t)1);
+	tidalsync_favorite_toggle(menu_track_id, false, row_sync_done, (void *)(intptr_t)1);
 }
 
 static void do_album_add(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (!menu_album_id[0]) {
 		return;
 	}
-	tidalsync_album_favorite(result_albums[menu_index].id_text, true, row_added_done, NULL);
+	tidalsync_album_favorite(menu_album_id, true, row_added_done, NULL);
 }
 
 static void do_album_remove(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (!menu_album_id[0]) {
 		return;
 	}
-	tidalsync_album_favorite(result_albums[menu_index].id_text, false, row_sync_done, (void *)(intptr_t)1);
+	tidalsync_album_favorite(menu_album_id, false, row_sync_done, (void *)(intptr_t)1);
 }
 
 static void do_playlist_delete(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (!menu_playlist_id[0]) {
 		return;
 	}
-	tidalsync_playlist_remove(result_playlists[menu_index].id, row_sync_done, (void *)(intptr_t)1);
+	tidalsync_playlist_remove(menu_playlist_id, row_sync_done, (void *)(intptr_t)1);
 }
 
 // The two destructive actions ask first: an accidental tap on the three dots
 // must not delete a playlist.
 static void ask_track_remove(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (menu_track_id == 0) {
 		return;
 	}
 	char message[TIDAL_TITLE_MAX + 64];
-	snprintf(message, sizeof(message), tr("will_no_longer_be_one_of"),
-			 result_tracks[menu_index].title);
+	snprintf(message, sizeof(message), tr("will_no_longer_be_one_of"), menu_name);
 	confirm_show("remove_from_favourites_2", message, "remove", do_track_remove, NULL);
 }
 
 static void ask_album_remove(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (!menu_album_id[0]) {
 		return;
 	}
 	char message[TIDAL_TITLE_MAX + 64];
-	snprintf(message, sizeof(message), tr("will_no_longer_be_one_of_2"),
-			 result_albums[menu_index].title);
+	snprintf(message, sizeof(message), tr("will_no_longer_be_one_of_2"), menu_name);
 	confirm_show("remove_from_favourites_2", message, "remove", do_album_remove, NULL);
 }
 
 static void ask_playlist_delete(void *user) {
 	(void)user;
-	if (menu_index < 0 || menu_index >= result_count) {
+	if (!menu_playlist_id[0]) {
 		return;
 	}
 	char message[TIDAL_TITLE_MAX + 64];
-	snprintf(message, sizeof(message), tr("tidal_delete_playlist_confirm_note"),
-			 result_playlists[menu_index].name);
+	snprintf(message, sizeof(message), tr("tidal_delete_playlist_confirm_note"), menu_name);
 	confirm_show("delete_the_playlist", message, "delete", do_playlist_delete, NULL);
 }
 
@@ -421,7 +425,28 @@ static void row_menu_cb(lv_event_t *e) {
 	if (index < 0 || index >= result_count) {
 		return;
 	}
-	menu_index = index;
+	menu_track_id = 0;
+	menu_album_id[0] = '\0';
+	menu_playlist_id[0] = '\0';
+	menu_name[0] = '\0';
+	switch (row_menu_kind(list_kind)) {
+	case ROW_MENU_TRACK_ADD:
+	case ROW_MENU_TRACK_REMOVE:
+		menu_track_id = result_tracks[index].id;
+		snprintf(menu_name, sizeof(menu_name), "%s", result_tracks[index].title);
+		break;
+	case ROW_MENU_ALBUM_ADD:
+	case ROW_MENU_ALBUM_REMOVE:
+		snprintf(menu_album_id, sizeof(menu_album_id), "%s", result_albums[index].id_text);
+		snprintf(menu_name, sizeof(menu_name), "%s", result_albums[index].title);
+		break;
+	case ROW_MENU_PLAYLIST_DELETE:
+		snprintf(menu_playlist_id, sizeof(menu_playlist_id), "%s", result_playlists[index].id);
+		snprintf(menu_name, sizeof(menu_name), "%s", result_playlists[index].name);
+		break;
+	default:
+		break;
+	}
 
 	popover_item_t item;
 	memset(&item, 0, sizeof(item));
@@ -541,9 +566,16 @@ static void art_poll_cb(lv_timer_t *timer) {
 		bool finished = false;
 		if (!qobuzart_take(&tidal_art_owner, slot, &image, &finished)) {
 			if (finished) {
-				row_art_failed[row] = true; // failed: never ask again
-				freed = true;
 				slot_owner[slot] = -1; // nothing to show: slot back to the pool
+				// Only while the slots are this page's does "nothing" mean the
+				// cover could not be had. Once they are another page's, the
+				// row is simply asked for again when this one is next shown --
+				// and nothing is asked for from here meanwhile, which would
+				// take the slots back from the page on screen.
+				if (qobuzart_owns(&tidal_art_owner)) {
+					row_art_failed[row] = true; // failed: never ask again
+					freed = true;
+				}
 			}
 			continue;
 		}
@@ -937,9 +969,8 @@ static void job_done_cb(void *user) {
 		break;
 
 	case JOB_PLAY:
-		// Nothing: the worker already opened the player the moment the music
-		// started. This runs much later -- after the next track has also been
-		// prefetched, which is minutes -- and reopening it now would tear away
+		// Nothing: the player was opened when the track was handed over to be
+		// started (play_start_async), and opening it again now would tear away
 		// whatever page the user has since opened.
 		break;
 
@@ -978,6 +1009,23 @@ static void job_done_cb(void *user) {
 		break;
 	}
 	job_result_taken();
+}
+
+// Hands the finished job to the GUI thread. A full queue is tried again for a
+// few seconds rather than given up on: the veil only comes down in
+// job_done_cb(), and a result dropped here would leave it over the whole
+// interface. Past that the result is let go, so the worker is not held by a
+// GUI that takes nothing.
+static void post_job_done(void) {
+	for (int tries = 0; tries < 100; tries++) {
+		if (gui_post(job_done_cb, NULL)) {
+			return;
+		}
+		usleep(50 * 1000);
+	}
+	pthread_mutex_lock(&job_lock);
+	result_pending = false;
+	pthread_mutex_unlock(&job_lock);
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,10 +1170,30 @@ static void cover_ready_async(void *user) {
 	free(path);
 }
 
-static void play_started_async(void *user) {
-	(void)user;
-	player_refresh_now_playing();
-	switch_screen(player_screen);
+// The queue the worker has prepared, handed to the GUI thread to be started.
+//
+// The play queue has no lock and belongs to the GUI thread, which reads it from
+// several timers: the worker downloads and works out the paths, and loading
+// them into the queue is done here.
+typedef struct {
+	int count;
+	int start;
+	char paths[][512];
+} play_start_t;
+
+static void play_start_async(void *user) {
+	play_start_t *ps = user;
+	const char **list = malloc((size_t)ps->count * sizeof(*list));
+	if (list) {
+		for (int i = 0; i < ps->count; i++) {
+			list[i] = ps->paths[i];
+		}
+		device_state_play_list(list, ps->count, ps->start);
+		free(list);
+		player_refresh_now_playing();
+		switch_screen(player_screen);
+	}
+	free(ps);
 }
 
 
@@ -1157,6 +1225,14 @@ static bool prefetch_started;
 static long prefetch_failed_id;
 static uint32_t prefetch_failed_ms;
 #define PREFETCH_RETRY_MS 4000
+
+// A track that has failed this many times running is let go: the watchdog
+// stops asking for it, so the thread stops knocking and the Wi-Fi is no longer
+// held awake for a download that is not coming. Asking for it again by hand --
+// starting it, or starting any list -- gives it a fresh set of tries.
+#define PREFETCH_GIVE_UP_AFTER 30
+static int prefetch_failed_count; // the prefetch thread's own
+static long prefetch_gaveup_id;	  // under prefetch_lock
 
 static void *prefetch_main(void *arg);
 
@@ -1225,8 +1301,45 @@ static void prefetch_urgent(const char *wanted_path) {
 
 	pthread_mutex_lock(&prefetch_lock);
 	prefetch_want_id = wanted;
+	if (prefetch_gaveup_id == wanted) {
+		prefetch_gaveup_id = 0; // asked for again: tried again
+	}
 	pthread_cond_broadcast(&prefetch_ready);
 	pthread_mutex_unlock(&prefetch_lock);
+}
+
+// The track playback is stopped on is not coming: say so, and stop waiting.
+static void prefetch_gave_up_async(void *user) {
+	(void)user;
+	if (!waiting_for_track) {
+		return; // a fetch ahead: nobody is waiting on it yet
+	}
+	pthread_mutex_lock(&prefetch_lock);
+	long gone = prefetch_gaveup_id;
+	pthread_mutex_unlock(&prefetch_lock);
+	int index = playlist_current_index();
+	char path[512];
+	if (gone == 0 || index < 0 || !playlist_path_at(index, path, sizeof(path)) || tidalcache_track_id(path) != gone) {
+		return;
+	}
+	waiting_for_track = false;
+	gui_notify_popup("download_failed");
+}
+
+// On the prefetch thread: one more failure for `id`.
+static void prefetch_note_failure(long id) {
+	prefetch_failed_count = id == prefetch_failed_id ? prefetch_failed_count + 1 : 1;
+	prefetch_failed_id = id;
+	prefetch_failed_ms = lv_tick_get();
+	if (prefetch_failed_count < PREFETCH_GIVE_UP_AFTER) {
+		return;
+	}
+	prefetch_failed_count = 0;
+	fprintf(stderr, "tidal: %ld is not coming, giving up on it\n", id);
+	pthread_mutex_lock(&prefetch_lock);
+	prefetch_gaveup_id = id;
+	pthread_mutex_unlock(&prefetch_lock);
+	gui_post(prefetch_gave_up_async, NULL);
 }
 
 // Prefetch of one list track while another plays: manifest, download, and the
@@ -1287,8 +1400,8 @@ static bool prepare_track(const tidal_track_t *track, char *path, size_t size) {
 	tidalcache_note_played(path);
 
 	char *owned = strdup(path);
-	if (owned) {
-		gui_post(cover_ready_async, owned);
+	if (owned && !gui_post(cover_ready_async, owned)) {
+		free(owned);
 	}
 	return true;
 }
@@ -1359,30 +1472,39 @@ static void do_play(int index) {
 	// container: if the track already exists under another name, the real one
 	// is used, which tidalcache_find locates by trying the extensions.
 	static char paths[TIDAL_MAX_HELD][512];
-	static const char *path_ptr[TIDAL_MAX_HELD];
 	const char *expected = tidal_expected_mime();
 
-	queued_count = 0;
+	int count = 0;
 	int start = 0;
-	for (int i = 0; i < result_count && queued_count < TIDAL_MAX_HELD; i++) {
+	for (int i = 0; i < result_count && count < TIDAL_MAX_HELD; i++) {
 		if (!result_tracks[i].streamable) {
 			continue; // unplayable: keep it out of the queue
 		}
 		if (i == index) {
-			start = queued_count;
+			start = count;
 			// The tapped one has already downloaded: queue its real name.
-			snprintf(paths[queued_count], sizeof(paths[0]), "%s", path);
-		} else if (!tidalcache_find(result_tracks[i].id, paths[queued_count], sizeof(paths[0]))) {
-			tidalcache_path(result_tracks[i].id, expected, paths[queued_count], sizeof(paths[0]));
+			snprintf(paths[count], sizeof(paths[0]), "%s", path);
+		} else if (!tidalcache_find(result_tracks[i].id, paths[count], sizeof(paths[0]))) {
+			tidalcache_path(result_tracks[i].id, expected, paths[count], sizeof(paths[0]));
 		}
-		path_ptr[queued_count] = paths[queued_count];
-		queued_tracks[queued_count] = result_tracks[i];
-		queued_count++;
+		count++;
 	}
 
-	if (queued_count == 0) {
+	if (count == 0) {
 		return;
 	}
+
+	// The same tracks, in the same order, for the prefetch thread: it reads
+	// this list under the same lock, so it never sees one half written.
+	pthread_mutex_lock(&prefetch_lock);
+	queued_count = 0;
+	for (int i = 0; i < result_count && queued_count < TIDAL_MAX_HELD; i++) {
+		if (result_tracks[i].streamable) {
+			queued_tracks[queued_count++] = result_tracks[i];
+		}
+	}
+	prefetch_gaveup_id = 0; // a list started by hand: everything in it is tried
+	pthread_mutex_unlock(&prefetch_lock);
 
 	// Tags for the whole queue, right away. They are text files of a few dozen
 	// bytes and cost nothing (no covers here: those are downloads and arrive
@@ -1396,15 +1518,29 @@ static void do_play(int index) {
 		tidalcache_write_sidecars(t->id, expected, t->title, t->artist, t->album, t->album_id, t->track_number, NULL);
 	}
 
-	device_state_play_list(path_ptr, queued_count, start);
+	// Started on the GUI thread, which owns the play queue: a copy of the paths
+	// goes over, since this array is written again by the next tap.
+	play_start_t *ps = malloc(sizeof(*ps) + (size_t)count * sizeof(ps->paths[0]));
+	if (ps) {
+		ps->count = count;
+		ps->start = start;
+		memcpy(ps->paths, paths, (size_t)count * sizeof(ps->paths[0]));
+	}
+	if (!ps || !gui_post(play_start_async, ps)) {
+		free(ps);
+		snprintf(result_error, sizeof(result_error), "%s", tr("download_failed"));
+		return;
+	}
 
-	// The cover now, with the music already playing: it is a download and not
-	// worth delaying the first note for. It goes before the player opens on
-	// purpose, so the image is already there when the page appears.
+	// The cover now, with the music already starting: it is a download and not
+	// worth delaying the first note for. The player is told when it has landed,
+	// as for a prefetched track.
 	tidalcache_write_sidecars(track->id, mime, track->title, track->artist, track->album, track->album_id,
 							  track->track_number, track->cover);
-
-	gui_post(play_started_async, NULL);
+	char *owned = strdup(path);
+	if (owned && !gui_post(cover_ready_async, owned)) {
+		free(owned);
+	}
 
 	// The following tracks are prefetched on their own thread.
 	prefetch_submit(start);
@@ -1467,6 +1603,10 @@ static void queue_watch_cb(lv_timer_t *timer) {
 	// The id is read from the path the queue gives for that position -- the
 	// queue is what knows its own order, shuffle included. `queued_tracks[i]`
 	// for the same `i` can be an entirely different track.
+	pthread_mutex_lock(&prefetch_lock);
+	long gaveup_id = prefetch_gaveup_id;
+	pthread_mutex_unlock(&prefetch_lock);
+
 	long want_id = 0;
 	if (!library_queue && !transfer_on && current >= 0 && queued_count > 0) {
 		for (int i = current; i <= current + PREFETCH_AHEAD && i < count && want_id == 0; i++) {
@@ -1475,6 +1615,14 @@ static void queue_watch_cb(lv_timer_t *timer) {
 				continue;
 			}
 			long id = tidalcache_track_id(path);
+			if (id != 0 && id == gaveup_id) {
+				// Given up on (see PREFETCH_GIVE_UP_AFTER): not asked for, and
+				// if it is the one playback stopped on, not waited for either.
+				if (i == current) {
+					waiting_for_track = false;
+				}
+				continue;
+			}
 			if (id != 0 && !tidalcache_find(id, NULL, 0)) {
 				want_id = id;
 			}
@@ -1536,19 +1684,24 @@ static void *prefetch_main(void *arg) {
 
 		// From id to track: the data (title, duration, cover) is looked up by
 		// searching the queued list, never by trusting a position.
-		int index = -1;
-		for (int i = 0; i < queued_count && index < 0; i++) {
+		// Under the lock, and copied out under it: the worker rewrites the list
+		// when another one is started.
+		tidal_track_t track;
+		bool known = false;
+		pthread_mutex_lock(&prefetch_lock);
+		for (int i = 0; i < queued_count && !known; i++) {
 			if (queued_tracks[i].id == id) {
-				index = i;
+				track = queued_tracks[i];
+				known = true;
 			}
 		}
+		pthread_mutex_unlock(&prefetch_lock);
 
-		if (index < 0) {
+		if (!known) {
 			// Not in the queue being played: wait for the watchdog to
 			// recompute rather than download for the previous queue.
 			fprintf(stderr, "tidal: %ld is not in the list we know, not downloading it\n", id);
-			prefetch_failed_id = id;
-			prefetch_failed_ms = lv_tick_get();
+			prefetch_note_failure(id);
 			pthread_mutex_lock(&prefetch_lock);
 			if (prefetch_want_id == id) {
 				prefetch_want_id = 0;
@@ -1557,7 +1710,6 @@ static void *prefetch_main(void *arg) {
 			continue;
 		}
 
-		tidal_track_t track = queued_tracks[index];
 		tidalcache_wait_idle();
 
 		// The request may have changed while waiting for a turn: prev is
@@ -1575,10 +1727,20 @@ static void *prefetch_main(void *arg) {
 		bool ok = prepare_track(&track, next_path, sizeof(next_path));
 		if (!ok) {
 			fprintf(stderr, "tidal: %ld does not download: %s\n", track.id, tidalcache_last_error());
-			prefetch_failed_id = id;
-			prefetch_failed_ms = lv_tick_get();
+			// Dropped for another track rather than refused: not a failure of
+			// this one's.
+			pthread_mutex_lock(&prefetch_lock);
+			bool passed_over = prefetch_want_id != 0 && prefetch_want_id != id;
+			pthread_mutex_unlock(&prefetch_lock);
+			if (passed_over) {
+				prefetch_failed_id = id;
+				prefetch_failed_ms = lv_tick_get();
+			} else {
+				prefetch_note_failure(id);
+			}
 		} else if (prefetch_failed_id == id) {
 			prefetch_failed_id = 0;
+			prefetch_failed_count = 0;
 		}
 
 		// Either way this request is done: the watchdog recomputes on its next
@@ -1792,7 +1954,7 @@ static void *worker_main(void *arg) {
 		pthread_mutex_lock(&job_lock);
 		result_pending = true;
 		pthread_mutex_unlock(&job_lock);
-		gui_post(job_done_cb, NULL);
+		post_job_done();
 	}
 	return NULL;
 }
@@ -2133,7 +2295,7 @@ static void build_search_page(gui_config_t *cfg) {
 	// Room for it, so a long query does not run underneath.
 	lv_obj_set_style_pad_right(search_field, 60, 0);
 
-	static const char *const KINDS[] = {"tracks_2", "albums", "artists"};
+	static const char *const KINDS[] = {"search_tracks_2", "albums", "artists"};
 	for (int i = 0; i < 3; i++) {
 		lv_obj_t *pill = lv_btn_create(search_screen);
 		lv_obj_set_size(pill, 140, 52);

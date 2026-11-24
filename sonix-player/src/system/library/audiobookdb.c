@@ -1339,16 +1339,16 @@ static void book_from_tags(book_t *b, const song_metadata_t *tags) {
 // Under db_lock, inside the scan's transaction.
 static void insert_book(const char *path, const book_t *b) {
 	sqlite3_stmt *stmt = NULL;
-	// Where the listener was survives a rescan: the scan stashes it in a temp
-	// table before wiping, and each insert copies its own back.
+	// Where the listener was survives a rescan: the scan stashes it in
+	// AUDIOBOOK_OLD_STATE before wiping, and each insert copies its own back.
 	if (sqlite3_prepare_v2(db,
 						   "INSERT OR REPLACE INTO AUDIOBOOK_TABLE"
 						   "(path,name,size,mtime,author,series,series_part,added,folder,summary,"
 						   "last_played,resume_file,resume_pos)"
 						   " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,"
-						   "COALESCE((SELECT last_played FROM old_state WHERE path=?1),0),"
-						   "(SELECT resume_file FROM old_state WHERE path=?1),"
-						   "(SELECT resume_pos FROM old_state WHERE path=?1))",
+						   "COALESCE((SELECT last_played FROM AUDIOBOOK_OLD_STATE WHERE path=?1),0),"
+						   "(SELECT resume_file FROM AUDIOBOOK_OLD_STATE WHERE path=?1),"
+						   "(SELECT resume_pos FROM AUDIOBOOK_OLD_STATE WHERE path=?1))",
 						   -1, &stmt, NULL) != SQLITE_OK) {
 		return;
 	}
@@ -1734,13 +1734,15 @@ static void *scan_thread_func(void *arg) {
 	pthread_mutex_lock(&db_lock);
 	// The rescan is wipe-and-refill, like the music library's, so books whose
 	// files are gone simply never come back. What must survive the wipe is
-	// where each book was left and when, so it is stashed in a temp table
-	// first and each insert copies its own back.
-	exec("CREATE TEMP TABLE IF NOT EXISTS old_state(path TEXT PRIMARY KEY, last_played INT, resume_file TEXT,"
+	// where each book was left and when, so it is stashed in a table of its
+	// own first and each insert copies its own back. The table is on the card
+	// and is emptied only by a scan that went to the end: one cut short leaves
+	// the rows of the books it never reached for the next scan, which adds
+	// what the index holds by then over them.
+	exec("CREATE TABLE IF NOT EXISTS AUDIOBOOK_OLD_STATE(path TEXT PRIMARY KEY, last_played INT, resume_file TEXT,"
 		 " resume_pos REAL)");
-	exec("DELETE FROM old_state");
-	exec("INSERT INTO old_state SELECT path, last_played, resume_file, resume_pos FROM AUDIOBOOK_TABLE"
-		 " WHERE last_played > 0 OR resume_file IS NOT NULL");
+	exec("INSERT OR REPLACE INTO AUDIOBOOK_OLD_STATE SELECT path, last_played, resume_file, resume_pos"
+		 " FROM AUDIOBOOK_TABLE WHERE last_played > 0 OR resume_file IS NOT NULL");
 	exec("DELETE FROM AUDIOBOOK_TABLE");
 	exec("DELETE FROM AUDIOBOOK_PARTS");
 	// The row ids restart at one, so anything holding them is pointing at
@@ -1759,6 +1761,7 @@ static void *scan_thread_func(void *arg) {
 			snprintf(sql, sizeof(sql), "PRAGMA user_version=%d", SCHEMA_VERSION);
 			exec(sql);
 			outdated = false;
+			exec("DELETE FROM AUDIOBOOK_OLD_STATE");
 		}
 		sqlite3_db_release_memory(db);
 	}

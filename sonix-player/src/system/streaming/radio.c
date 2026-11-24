@@ -161,6 +161,18 @@ static unsigned hex4(const char *p) {
 	return v;
 }
 
+// True when four hex digits start at p. Stops at the first byte that is not
+// one, so it never reads past the end of the string.
+static bool is_hex4(const char *p) {
+	for (int i = 0; i < 4; i++) {
+		char c = p[i];
+		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+			return false;
+		}
+	}
+	return true;
+}
+
 // Unescapes a JSON string literal (from the opening quote) into out.
 static void unescape_into(const char *p, char *out, size_t out_size) {
 	size_t o = 0;
@@ -190,11 +202,18 @@ static void unescape_into(const char *p, char *out, size_t out_size) {
 			p++;
 			break;
 		case 'u': {
+			// Without its four digits the escape is dropped and only the
+			// 'u' is stepped over: stepping five would walk past the closing
+			// quote, and past the end of the reply.
+			if (!is_hex4(p + 1)) {
+				p++;
+				break;
+			}
 			unsigned cp = hex4(p + 1);
 			p += 5;
 			// A surrogate pair is two escapes; join them or the name comes
 			// out as two replacement characters.
-			if (cp >= 0xD800 && cp <= 0xDBFF && p[0] == '\\' && p[1] == 'u') {
+			if (cp >= 0xD800 && cp <= 0xDBFF && p[0] == '\\' && p[1] == 'u' && is_hex4(p + 2)) {
 				unsigned low = hex4(p + 2);
 				if (low >= 0xDC00 && low <= 0xDFFF) {
 					cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
@@ -1163,7 +1182,17 @@ static custom_line_t custom_parse_line(char *line, radio_station_t *out, char *h
 	// A uuid of its own so the favourites and the recent list can tell one of
 	// these from a station off the directory, and from each other. The line's
 	// address is what makes it that station.
-	snprintf(out->uuid, sizeof(out->uuid), "txt:%.30s", url);
+	// Thirty characters of it are not enough to tell two streams of one host
+	// apart, so a longer address ends in a hash of the whole of it.
+	if (strlen(url) <= 30) {
+		snprintf(out->uuid, sizeof(out->uuid), "txt:%s", url);
+	} else {
+		uint32_t h = 2166136261u; // FNV-1a
+		for (const unsigned char *c = (const unsigned char *)url; *c; c++) {
+			h = (h ^ *c) * 16777619u;
+		}
+		snprintf(out->uuid, sizeof(out->uuid), "txt:%.21s#%08x", url, (unsigned)h);
+	}
 	return CUSTOM_LINE_STATION;
 }
 
@@ -2907,6 +2936,9 @@ static bool play_one_connection(const char *url, unsigned mine, char *redirect, 
 			} else if (taken == 0) {
 				// Took nothing and returned nothing: the buffer holds bytes the
 				// decoder cannot use. Dropping it beats stalling.
+				if (ended) {
+					break; // and nothing more is coming to replace them
+				}
 				have = 0;
 				continue;
 			}
@@ -3001,7 +3033,9 @@ static void *click_main(void *arg) {
 }
 
 static void report_click(const char *uuid) {
-	if (!uuid || !uuid[0]) {
+	// A station out of radio.txt is not in the directory, and its uuid is made
+	// of the user's own address: nothing to count, and nothing to send.
+	if (!uuid || !uuid[0] || strncmp(uuid, "txt:", 4) == 0) {
 		return;
 	}
 

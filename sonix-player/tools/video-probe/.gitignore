@@ -1,0 +1,6 @@
+# Downloads and build trees of build-decprobe.sh and make-clips.sh.
+.build/
+
+# What build.sh and build-decprobe.sh produce.
+fbprobe
+decprobe

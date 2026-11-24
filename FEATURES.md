@@ -25,6 +25,9 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 - **Main page** - All tracks, Albums, Artists, Album artists, Genres, Years, Favourites, Most played, Playlists and Browse. You can rearrange the tiles and hide the ones you don't use.
 - **Browse** - go through the folders of the card as they are.
+- **Track lengths** - track rows in the music lists and in the search results show the track's length. The lengths are read when the library is scanned; on a library scanned before, Detect changes fills them in a little at a time, and a rescan does it at once.
+- **Album running time** - the alternative album view shows the album's total length once the length of every track is known.
+- **Long titles** - a long press on a row whose title is cut off scrolls the title past in full.
 - **Search** across tracks, albums and artists.
 - **Sorting** - by name (A-Z or Z-A), by date added (newest or oldest first) or by year.
 - **A-Z bar** on the side when you scroll a long list.
@@ -55,6 +58,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **ReplayGain** - off, by track or by album, read from the tags.
 - **Remember track** - the queue and the position are still there after a restart. You can also open Now Playing straight away at startup.
 - **Sleep timer** - set a time and the playback pauses by itself when it runs out. There is one for music, one for audiobooks and one for podcasts.
+- **Auto sleep timer** - an optional nightly window (22:00 to 06:00 unless changed) in which music, audiobooks and podcasts pause after their sleep timer's length without the timer being switched on by hand. Pressing a button or a key on the headphone remote starts the countdown again. It stays off while the clock is not set.
 
 ## Now Playing
 
@@ -62,7 +66,8 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Three layouts** - Standard, Waveform (the progress bar becomes the waveform of the track) and Alternative.
 - **Cover colour** - the buttons and the bar take the main colour of the cover.
 - **Cover Flow** - swipe up from the bottom edge of the Music page to flip through your albums.
-- **Queue**, **Details** (format, bitrate, size, ReplayGain and more) and **Show album** from the menu.
+- **Queue**, **Details** (length, format, bitrate, size, ReplayGain and more) and **Show album** from the menu.
+- **Level meter** - an optional meter over the foot of the cover (Settings > Music > Now Playing, off unless turned on), in three shapes: two bars with a peak-hold tick, two dials with needles, or a ten-band spectrum from 31 Hz to 16 kHz. Pick the shape in the settings or tap the meter to move to the next. It is on a dB scale and shows the sound as it is heard, not as it is handed to the output, for everything the player sends there, radio, AirPlay and the Bluetooth receiver included. It rests on DSD and when paused, and is not shown in the Waveform layout or over the lyrics.
 - **Chapters** and **speed** when an audiobook or a podcast is playing.
 
 ## Lyrics
@@ -103,7 +108,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Qobuz** - sign in with your account. MP3 320, FLAC 16/44.1, 24/96 and 24/192. Search, albums, artists, playlists, favourites and new releases. You can add and remove favourites and manage your playlists from the player.
 - **Radio** - thousands of stations by country, language or genre, plus search, favourites and recently played. MP3, AAC and FLAC stations.
   > **My stations** - write your own list in a `radio.txt` file in the root of the card, one station per line: `name, address`.
-- **Last.fm** - scrobbles what you listen to. Without Wi-Fi the plays are kept and sent the next time the player connects.
+- **Last.fm** - scrobbles what you listen to. Without Wi-Fi the plays are kept and sent the next time the player connects. Sign in by scanning a QR code with your phone, or with your password.
 
 ## Podcasts
 
@@ -111,6 +116,8 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Follow** up to 100 podcasts.
 - **Download** episodes to the card, one at a time or many together, and listen to them without Wi-Fi.
 - **Podcasts on the card** - your own podcasts are played too.
+- **Details** in an episode's menu shows its full title with its date and length; a long press on a Continue listening row does the same.
+- **Mark all as heard**, or as not heard, from the three dots at the top of a podcast's page.
   > One folder per podcast inside the `Podcast` folder. Title, date and cover are read from the tags.
 - **Continue listening** - every episode remembers where you stopped.
 - **Heard and to hear** - filter the episodes and mark them as heard or not. An episode counts as heard when you stop in its last 30 seconds, 1 minute or 2 minutes (you choose).
@@ -146,10 +153,12 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## More
 
-- **File manager** - browse the card, create folders, rename, move, copy and delete. Pictures and text files open right there.
+- **File manager** - browse the card, create folders, rename, move, copy and delete. Pictures, text files and videos open right there.
 - **Metronome** - 30 to 250 BPM, up to 7 beats per bar, and tap tempo.
 - **Game Boy** (Gearboy) - plays Game Boy and Game Boy Color games, with their real names, save states, five palettes, shaders and color correction.
   > ROMs go in `Games/GB` and `Games/GBC`. The boot ROMs (optional) go in `Games/Bios`: `dmg_boot.bin` and `cgb_boot.bin`.
+- **Video** - plays videos from the `Video` folder of the card, turned sideways to fill the screen, with pause, 10-second skips and a progress bar you can drag or tap to go anywhere in the film.
+  > Videos have to be converted first: the player has no hardware decoder and does not scale. `tools/video-convert.sh` (on a computer, needs ffmpeg) makes an MPEG-4 `.mp4` no larger than the screen from anything ffmpeg reads. [VIDEO.md](VIDEO.md) has the details.
 - **Flappy Bird**, with sounds.
 
 ## Wireless
@@ -173,9 +182,9 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Buttons and remotes
 
-- **Remap buttons** - give each media and volume button another action.
+- **Remap buttons** - give each media and volume button another action, including **jump back** (10 s) and **jump forward** (30 s) inside the track, episode or book. On an audiobook the jumps use the book's own skip lengths.
 - **Double click** - two quick presses of a button do the action you choose.
-- **In-line remote** - on wired headphones: one click play/pause, two clicks next, three clicks previous. USB-C headphones with buttons work too.
+- **In-line remote** - on wired headphones: one click play/pause, two clicks next, three clicks previous; hold the button to jump back 10 s, or click and then hold to jump forward 30 s. USB-C headphones with buttons work too (clicks only).
 - **Lock the buttons** with the screen off: volume down + power. The power button and the remote always work.
 - **Keyboard** - eleven layouts (English, Italian, German, Spanish, French, Dutch, Polish, Brazilian Portuguese, Czech, Russian, Japanese), as a full keyboard or as a phone keypad (T9). Japanese types romaji as hiragana or katakana, has a ten-key kana pad (tap a key again, or flick it, for the next kana of its row) and offers kanji candidates for the hiragana before the caret.
 - **Screenshots** - turn them on in Settings > More, then press volume up + power to save the screen to the card.
@@ -192,7 +201,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 
 ## Power and battery
 
-- **Standby** after the time you choose, and **auto power-off** when nothing is playing.
+- **Standby** after the time you choose, and **auto power-off** when nothing is playing, after 15 minutes up to 48 hours.
 - **Battery screen when off** - plug in the charger with the player off and you see the battery level. Press the power button to see it again, hold it to start the player.
 - **Charge limit** - stop charging before 100% to make the battery last longer: at 80% on the R1, or anywhere from 80% to 100% on the R3 Pro II. On the R1 you can also limit the charging current to 500 mA.
 - **Low battery** - a warning at 5%, and at 1% the player turns itself off with a 10 second countdown, also in standby.

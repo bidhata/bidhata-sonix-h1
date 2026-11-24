@@ -85,16 +85,85 @@ void dbus_w_i64(dbus_writer_t *w, int64_t v) {
 	w_raw(w, &v, 8);
 }
 
+// How many bytes the UTF-8 sequence at `p` takes, or 0 when what is there is
+// not one: a stray continuation byte, a sequence cut short, an overlong form, a
+// surrogate, or a value past U+10FFFF.
+static size_t utf8_sequence(const uint8_t *p, size_t left) {
+	uint8_t c = p[0];
+	size_t need;
+	if (c < 0x80) {
+		return 1;
+	} else if (c < 0xC2) {
+		return 0;
+	} else if (c < 0xE0) {
+		need = 2;
+	} else if (c < 0xF0) {
+		need = 3;
+	} else if (c < 0xF5) {
+		need = 4;
+	} else {
+		return 0;
+	}
+	if (left < need) {
+		return 0;
+	}
+	for (size_t i = 1; i < need; i++) {
+		if ((p[i] & 0xC0) != 0x80) {
+			return 0;
+		}
+	}
+	if ((c == 0xE0 && p[1] < 0xA0) || (c == 0xED && p[1] > 0x9F) || (c == 0xF0 && p[1] < 0x90) ||
+		(c == 0xF4 && p[1] > 0x8F)) {
+		return 0;
+	}
+	return need;
+}
+
+// The length of `v` without a last character that is only partly there, which
+// is what a name cut to fit a fixed buffer ends in.
+static size_t utf8_whole_length(const char *v, size_t len) {
+	const uint8_t *p = (const uint8_t *)v;
+	size_t i = len;
+	size_t tail = 0;
+	while (i > 0 && tail < 3 && (p[i - 1] & 0xC0) == 0x80) {
+		i--;
+		tail++;
+	}
+	if (i == 0) {
+		return len;
+	}
+	uint8_t lead = p[i - 1];
+	size_t need = lead >= 0xF0 ? 4 : (lead >= 0xE0 ? 3 : (lead >= 0xC0 ? 2 : 1));
+	return (need > 1 && need > tail + 1) ? i - 1 : len;
+}
+
 // A string is a 32-bit length, the bytes, and a terminator that the length does
 // not count. An object path is spelled the same way; only the signature that
 // introduces it differs.
+//
+// The bytes must be UTF-8: dbus-daemon closes the connection of a client that
+// sends anything else, and the text here comes from file tags, file names and
+// names typed on the device. A character cut in half at the end is left off,
+// and any other byte that is not part of a valid sequence goes out as '?'.
 static void w_string_body(dbus_writer_t *w, const char *v) {
 	if (!v) {
 		v = "";
 	}
-	size_t len = strlen(v);
+	size_t len = utf8_whole_length(v, strlen(v));
 	dbus_w_u32(w, (uint32_t)len);
-	w_raw(w, v, len + 1);
+	size_t at = w->used;
+	w_raw(w, v, len);
+	if (!w->overflow && w->used == at + len) {
+		for (size_t i = 0; i < len;) {
+			size_t n = utf8_sequence(w->buf + at + i, len - i);
+			if (n == 0) {
+				w->buf[at + i] = '?';
+				n = 1;
+			}
+			i += n;
+		}
+	}
+	dbus_w_byte(w, 0);
 }
 
 void dbus_w_string(dbus_writer_t *w, const char *v) { w_string_body(w, v); }

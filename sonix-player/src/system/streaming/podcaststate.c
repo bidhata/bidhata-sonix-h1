@@ -133,7 +133,10 @@ static void absolute(const char *stored, char *out, size_t size) {
 	} else if (stored[0] == '/' || !card_root[0]) {
 		snprintf(out, size, "%s", stored);
 	} else {
-		snprintf(out, size, "%.*s/%.*s", 255, card_root, 255, stored);
+		// A path that does not fit names no file: none, rather than a cut one.
+		if (snprintf(out, size, "%s/%s", card_root, stored) >= (int)size) {
+			out[0] = '\0';
+		}
 	}
 }
 
@@ -848,6 +851,123 @@ void podcaststate_set_played_episode(const podcast_episode_t *episode, const cha
 	pthread_mutex_unlock(&current_lock);
 	writer_drain();
 	write_now(key, &s);
+}
+
+// How many episodes podcaststate_set_played_many() writes per transaction: few
+// enough that the lock is not held long enough for a page to notice, many
+// enough that a thousand episodes are a handful of commits.
+#define MARK_BATCH 64
+
+typedef struct {
+	char key[600];
+	podcaststate_t s;
+} mark_row_t;
+
+// The episode playing, when it is one of those being marked: its next note
+// would otherwise write the old answer back.
+static void mark_current(const char *key, long long feed_id, bool played) {
+	pthread_mutex_lock(&current_lock);
+	if (current_valid && (key ? strcmp(current_key, key) == 0 : current.feed_id == feed_id)) {
+		current.played = played;
+		if (played) {
+			current.position = 0;
+		}
+		current_dirty = false;
+	}
+	pthread_mutex_unlock(&current_lock);
+}
+
+void podcaststate_set_played_many(long long feed_id, const char *show, const char *image,
+								  const podcaststate_mark_t *episodes, int count, bool played) {
+	if (!db_path[0]) {
+		return;
+	}
+	if (feed_id > 0) {
+		mark_current(NULL, feed_id, played);
+		writer_drain();
+		pthread_mutex_lock(&db_lock);
+		sqlite3 *db = open_db();
+		sqlite3_stmt *stmt = NULL;
+		// Heard puts the position back to zero; not heard leaves it.
+		if (db && sqlite3_prepare_v2(db,
+									 "UPDATE PODCAST_EPISODES SET played=?1,"
+									 " position=CASE WHEN ?1 THEN 0 ELSE position END WHERE feed_id=?2",
+									 -1, &stmt, NULL) == SQLITE_OK) {
+			sqlite3_bind_int(stmt, 1, played ? 1 : 0);
+			sqlite3_bind_int64(stmt, 2, (sqlite3_int64)feed_id);
+			if (sqlite3_step(stmt) != SQLITE_DONE) {
+				fprintf(stderr, "podcaststate: write failed: %s\n", sqlite3_errmsg(db));
+			}
+			sqlite3_finalize(stmt);
+		}
+		pthread_mutex_unlock(&db_lock);
+		revision++;
+	}
+	if (!episodes || count <= 0) {
+		return;
+	}
+	mark_row_t *rows = malloc(MARK_BATCH * sizeof(*rows));
+	if (!rows) {
+		return;
+	}
+	int at = 0;
+	while (at < count) {
+		// What each row will say, put together before the lock is taken: a file
+		// with no row yet has its tags read for it.
+		int n = 0;
+		for (; at < count && n < MARK_BATCH; at++) {
+			const podcaststate_mark_t *e = &episodes[at];
+			mark_row_t *row = &rows[n];
+			bool file = e->path && e->path[0];
+			long long id = file ? podcastcache_episode_id(e->path) : e->episode_id;
+			if (!key_for(file ? e->path : NULL, id, row->key, sizeof(row->key))) {
+				continue;
+			}
+			if (!get_by_key(row->key, &row->s)) {
+				if (!played) {
+					continue; // no row is not heard already
+				}
+				memset(&row->s, 0, sizeof(row->s));
+				if (file) {
+					describe(e->path, &row->s);
+				} else {
+					snprintf(row->s.title, sizeof(row->s.title), "%s", e->title);
+					snprintf(row->s.show, sizeof(row->s.show), "%s", show ? show : "");
+					snprintf(row->s.image, sizeof(row->s.image), "%s", image ? image : "");
+					row->s.feed_id = feed_id;
+					row->s.episode_id = id;
+					row->s.duration = e->duration;
+				}
+			}
+			if (file) {
+				snprintf(row->s.path, sizeof(row->s.path), "%s", e->path);
+			}
+			row->s.played = played;
+			if (played) {
+				row->s.position = 0;
+			}
+			n++;
+		}
+		if (n == 0) {
+			continue;
+		}
+		for (int i = 0; i < n; i++) {
+			mark_current(rows[i].key, 0, played);
+		}
+		writer_drain();
+		pthread_mutex_lock(&db_lock);
+		sqlite3 *db = open_db();
+		if (db && exec(db, "BEGIN")) {
+			for (int i = 0; i < n; i++) {
+				keep_download(db, rows[i].key, &rows[i].s);
+				upsert(db, rows[i].key, &rows[i].s);
+			}
+			exec(db, "COMMIT");
+		}
+		pthread_mutex_unlock(&db_lock);
+		revision++;
+	}
+	free(rows);
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@
 #include "src/gui/shell/gridpage.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/settingsrow.h"
+#include "src/gui/video/videopage.h"
 
 lv_obj_t *morepage_screen;
 
@@ -33,13 +34,26 @@ void morepage_init(gui_config_t *cfg) {
 		// An action: the artwork is read from the resource tree on the way in.
 		{"flappy_bird", &icon_menu_flappy_bird, NULL, flappybird_open},
 		{"metronome", &icon_menu_metronome, &metronomepage_screen, NULL},
+#if VIDEO_CORE
+		// The video player. Present only when the binary carries FFmpeg (see
+		// the Makefile): always on the device, on the host when the system has
+		// the libraries.
+		{"video", &icon_menu_video, &videopage_screen, NULL},
+#endif
 	};
 
 	// Two columns by three rows, like the Music and Wireless pages, so a tile
 	// here is exactly the size of a tile there. The grid is laid out as full
 	// even with fewer entries, so the only tile sits where it would with six --
 	// top left -- instead of floating in the middle of a page of its own.
-	gridpage_build(morepage_screen, cfg, entries, (int)(sizeof(entries) / sizeof(entries[0])), 2, 3, true);
+	//
+	// With video there are seven, one more than the grid holds: the tiles keep
+	// their size and the page scrolls to the last one, as the Music page does.
+	int count = (int)(sizeof(entries) / sizeof(entries[0]));
+	lv_obj_t *grid = gridpage_build(morepage_screen, cfg, entries, count, 2, 3, true);
+	if (count > 2 * 3) {
+		gridpage_set_scrolling(grid);
+	}
 
 	settingsrow_title(morepage_screen, cfg, "more");
 }

@@ -18,7 +18,12 @@
 #define SIZE_WINDOW 1024   // sample sizes cached at a time
 #define MAX_SMALL_BOX (4 * 1024 * 1024)
 #define MAX_DEPTH 12
-#define MAX_FREEFORM 8
+// How many freeform tags a file's are kept of, and how many of those places
+// are held back for ReplayGain. The atoms come in the order the tagger wrote
+// them, often alphabetical, and a file tagged from MusicBrainz carries a dozen
+// or more ahead of its replaygain_* ones.
+#define MAX_FREEFORM 32
+#define FREEFORM_REPLAYGAIN 4
 
 struct chunk_run {
 	uint32_t first_chunk; // 1-based, as the file writes it
@@ -117,7 +122,8 @@ struct mp4_file {
 
 	// The iTunes freeform tags worth keeping. Only a handful are ever wanted,
 	// and holding every "----" atom a file might carry would mean an allocator
-	// for something nobody reads.
+	// for something nobody reads. The last FREEFORM_REPLAYGAIN places take
+	// replaygain_* tags only, so that those fit however many others came first.
 	struct {
 		char name[40];
 		char value[40];
@@ -608,7 +614,8 @@ static void parse_ilst(mp4_file_t *m, const box_t *ilst) {
 				snprintf(m->series, sizeof(m->series), "%s", value);
 			} else if (name[0] && value[0] && (strcasecmp(name, "SERIES-PART") == 0 || strcasecmp(name, "SERIES_PART") == 0)) {
 				snprintf(m->series_part, sizeof(m->series_part), "%.*s", (int)sizeof(m->series_part) - 1, value);
-			} else if (name[0] && value[0] && m->freeform_count < MAX_FREEFORM) {
+			} else if (name[0] && value[0] &&
+					   m->freeform_count < (strncasecmp(name, "replaygain_", 11) == 0 ? MAX_FREEFORM : MAX_FREEFORM - FREEFORM_REPLAYGAIN)) {
 				snprintf(m->freeform[m->freeform_count].name, sizeof(m->freeform[0].name), "%.*s",
 						 (int)sizeof(m->freeform[0].name) - 1, name);
 				snprintf(m->freeform[m->freeform_count].value, sizeof(m->freeform[0].value), "%.*s",
@@ -1512,6 +1519,12 @@ int mp4_read_audio_frame(mp4_file_t *m, uint32_t index, unsigned char *buf, uint
 	uint64_t offset = 0;
 	uint32_t size = 0;
 	if (!frame_location(m, m->audio, index, &offset, &size) || size == 0) {
+		return 0;
+	}
+	// A size the file cannot hold is a broken table, not a frame to make room
+	// for -- and past INT_MAX the negated size below would come out positive
+	// and be taken for a length that was read.
+	if ((uint64_t)size > m->file_size || size > 0x7FFFFFFFu) {
 		return 0;
 	}
 	if (size > buf_size) {

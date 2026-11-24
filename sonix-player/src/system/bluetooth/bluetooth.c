@@ -218,6 +218,17 @@ static int g_pending_volume = -1; // coalesces a held volume key into one write
 static bt_stream_t g_rx_stream;
 static unsigned g_rx_serial; // moves every time the worker reads the line above
 
+// The codecs the sending device offered on the link that is up, and the one in
+// use. Filled on the worker with the stream line above, read by the receiver
+// page under `lock`: the page is on the interface thread and the D-Bus
+// connection takes one caller at a time.
+static char g_rx_codecs[BT_MAX_CODECS][BT_CODEC_MAX];
+static int g_rx_codec_count;
+static char g_rx_codec_selected[BT_CODEC_MAX];
+// Which device and which codec the list above was read for. Worker only.
+static char rx_codecs_mac[BT_MAC_MAX];
+static char rx_codecs_for[BT_CODEC_MAX];
+
 static void post_job(const job_t *job);
 
 // ---------------------------------------------------------------------------
@@ -903,13 +914,13 @@ static const char *bluealsa_help(void) {
 		asked = true;
 		int fds[2];
 		if (pipe(fds) != 0) {
-			return false;
+			return help;
 		}
 		pid_t pid = fork();
 		if (pid < 0) {
 			close(fds[0]);
 			close(fds[1]);
-			return false;
+			return help;
 		}
 		if (pid == 0) {
 			dup2(fds[1], STDOUT_FILENO);
@@ -2672,6 +2683,22 @@ static void do_read_receiver(void) {
 		btstack_forget_media();
 	}
 
+	// The list of codecs with it, but only when the device or the codec in use
+	// is not the one the list was read for: it is two more round trips, and this
+	// runs once a second while a device is streaming.
+	char codecs[BT_MAX_CODECS][BT_CODEC_MAX];
+	char selected[BT_CODEC_MAX] = "";
+	int codec_count = -1; // -1: the list in the cache stands
+	if (!sending) {
+		codec_count = 0;
+		rx_codecs_mac[0] = '\0';
+		rx_codecs_for[0] = '\0';
+	} else if (have && (strcasecmp(rx_codecs_mac, mac) != 0 || strcasecmp(rx_codecs_for, info.codec) != 0)) {
+		codec_count = btstack_codecs_dir(mac, true, codecs, BT_MAX_CODECS, selected, sizeof(selected));
+		snprintf(rx_codecs_mac, sizeof(rx_codecs_mac), "%s", mac);
+		snprintf(rx_codecs_for, sizeof(rx_codecs_for), "%s", info.codec);
+	}
+
 	pthread_mutex_lock(&lock);
 	if (have) {
 		snprintf(g_rx_stream.codec, sizeof(g_rx_stream.codec), "%s", info.codec);
@@ -2680,6 +2707,11 @@ static void do_read_receiver(void) {
 		g_rx_stream.bits = info.bits;
 	} else {
 		memset(&g_rx_stream, 0, sizeof(g_rx_stream));
+	}
+	if (codec_count >= 0) {
+		memcpy(g_rx_codecs, codecs, sizeof(char) * (size_t)codec_count * BT_CODEC_MAX);
+		g_rx_codec_count = codec_count;
+		snprintf(g_rx_codec_selected, sizeof(g_rx_codec_selected), "%s", selected);
 	}
 	g_rx_serial++;
 	g_serial++;
@@ -2730,11 +2762,12 @@ bool bluetooth_receiver_stream(bt_stream_t *out) {
 }
 
 // What the phone offered on the link that is up, and which of them it is using.
-// Unlike the headphone direction this is read on the spot rather than cached:
-// the list is only ever wanted while the receiver page is open, and a poll for
-// it would be a D-Bus round trip every half second for nothing.
+// Answered from what the worker last read (do_read_receiver): this is called on
+// the interface thread, which must neither block on D-Bus nor share the
+// worker's connection. An empty answer with a device streaming asks the worker
+// to read, so the next call has it.
 int bluetooth_receiver_codecs(char out[][BT_CODEC_MAX], int max, char *selected, int selected_size) {
-	if (selected && selected_size) {
+	if (selected && selected_size > 0) {
 		selected[0] = '\0';
 	}
 	if (!out || max <= 0) {
@@ -2745,7 +2778,23 @@ int bluetooth_receiver_codecs(char out[][BT_CODEC_MAX], int max, char *selected,
 	if (!btstack_audio_source(mac, sizeof(mac))) {
 		return 0;
 	}
-	return btstack_codecs_dir(mac, true, out, max, selected, selected_size ? (size_t)selected_size : 0);
+
+	pthread_mutex_lock(&lock);
+	int count = g_rx_codec_count < max ? g_rx_codec_count : max;
+	for (int i = 0; i < count; i++) {
+		size_t length = strnlen(g_rx_codecs[i], BT_CODEC_MAX - 1);
+		memcpy(out[i], g_rx_codecs[i], length);
+		out[i][length] = '\0';
+	}
+	if (selected && selected_size > 0) {
+		snprintf(selected, (size_t)selected_size, "%s", g_rx_codec_selected);
+	}
+	pthread_mutex_unlock(&lock);
+
+	if (count == 0) {
+		bluetooth_refresh_receiver();
+	}
+	return count;
 }
 
 bool bluetooth_receiver_track(bt_track_t *out) {
@@ -2891,6 +2940,12 @@ static void post_job(const job_t *job) {
 
 	if (!queued) {
 		fprintf(stderr, "bluetooth: job queue full (%d); dropping a job of type %d\n", JOB_QUEUE_LEN, (int)job->type);
+		if (job->type == JOB_VOLUME) {
+			// Nothing will pick the value up, so the next change posts again.
+			pthread_mutex_lock(&lock);
+			g_pending_volume = -1;
+			pthread_mutex_unlock(&lock);
+		}
 	}
 }
 
@@ -3244,6 +3299,9 @@ static void set_enabled(bool on, bool remember) {
 		// attempt takes.
 		queue_head = 0;
 		queue_count = 0;
+		// The volume job went with the rest: without this the next change of
+		// volume would believe one is still on its way and post none.
+		g_pending_volume = -1;
 		// Renames waiting are kept: the "name changed" has already been said,
 		// and they go to bluez before the stack comes down (bring_stack_down).
 	}

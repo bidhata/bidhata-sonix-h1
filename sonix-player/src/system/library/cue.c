@@ -605,6 +605,7 @@ static bool cue_parse_wav(const char *wav_path, cue_sheet_t *out) {
 	for (int i = 0; i < tracks; i++) {
 		cue_track_t *t = &out->tracks[i];
 		t->number = i + 1;
+		t->written = i + 1;
 
 		int mark = implicit_first ? i - 1 : i;
 		t->begin_ms = (mark < 0) ? 0 : marks[mark].frame * 1000ull / rate;
@@ -775,7 +776,7 @@ bool cue_parse(const char *cue_path, cue_sheet_t *out) {
 	}
 
 	// Drop the headings that never got an INDEX 01, closing the gaps so the
-	// array stays contiguous. Track numbers keep what the sheet wrote.
+	// array stays contiguous. `written` keeps what the sheet wrote.
 	int kept = 0;
 	for (int i = 0; i < count; i++) {
 		if (!placed[i]) {
@@ -793,6 +794,11 @@ bool cue_parse(const char *cue_path, cue_sheet_t *out) {
 	}
 
 	for (int i = 0; i < kept; i++) {
+		// A virtual path names a track by its place in this array, which is
+		// how every reader of one finds it again; the sheet's own numbers can
+		// start anywhere and skip.
+		out->tracks[i].written = out->tracks[i].number;
+		out->tracks[i].number = i + 1;
 		if (!out->tracks[i].performer[0]) {
 			copy_bounded(out->tracks[i].performer, sizeof(out->tracks[i].performer), out->performer);
 		}

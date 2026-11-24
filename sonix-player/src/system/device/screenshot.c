@@ -104,7 +104,7 @@ static void *write_thread(void *arg) {
 #else
 	const char *root = storage_sd_root();
 #endif
-	if (!root || !*root) {
+	if (!root || !*root || !storage_card_usable()) {
 		printf("screenshot: no card to write to\n");
 		gui_notify_popup("screenshot_failed_no_card");
 		goto done;

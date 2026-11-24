@@ -44,7 +44,9 @@ const char *firmware_update_stem(void);
 // accepted, "update.upt" included.
 bool firmware_update_file_find(char *out, size_t out_size);
 
-// Arms recovery and reboots into it. Does not return on the device.
+// Arms recovery and reboots into it. Does not return on the device, except
+// with false when it refuses: the battery reads under 30% with no cable in, a
+// level a flash must not be started on. The refusal shows its own message.
 //
 // Stops playback and flushes the filesystems first: the card is about to be
 // read by the recovery kernel, and an unflushed write on it is how a good
@@ -52,6 +54,6 @@ bool firmware_update_file_find(char *out, size_t out_size);
 //
 // A no-op that only logs on the host build -- writing to /dev/mtd5 on the
 // developer's own machine is not a mistake worth being able to make.
-void firmware_update_start(void);
+bool firmware_update_start(void);
 
 #endif /* FIRMWARE_H */

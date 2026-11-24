@@ -36,6 +36,16 @@ static lv_obj_t *password_field;
 static lv_obj_t *password_eye_icon;
 static keyboard_t *login_keyboard;
 
+// Signing in on a phone: the page with the QR code.
+#define WEB_QR_SIZE 220
+#define WEB_QR_QUIET 10
+
+static lv_obj_t *web_screen;
+static lv_obj_t *web_qr;
+static lv_obj_t *web_hint;
+static lv_obj_t *web_address;
+static char web_shown_url[LASTFM_WEB_URL_MAX];
+
 static unsigned seen_login_serial;
 static bool waiting_for_login;
 
@@ -89,7 +99,19 @@ static void refresh(void) {
 	lv_label_set_text_fmt(queued_value, "%d", st.queued);
 }
 
+// The sign-in starts on the page with the QR code; the one with the two fields
+// is reached from there.
 static void open_login(void) {
+	wifi_status_t wifi;
+	wifi_get_status(&wifi);
+	if (wifi.state != WIFI_STATE_CONNECTED || !wifi.ip[0]) {
+		toast_error("enable_wi_fi_first");
+		return;
+	}
+	switch_screen(web_screen);
+}
+
+static void open_password_login(void) {
 	lv_textarea_set_text(user_field, "");
 	lv_textarea_set_text(password_field, "");
 	lv_textarea_set_password_mode(password_field, true);
@@ -278,6 +300,110 @@ static void build_login(gui_config_t *cfg) {
 	switcher_attach_back_gesture(login_screen);
 }
 
+// ---------------------------------------------------------------------------
+// signing in on a phone
+// ---------------------------------------------------------------------------
+
+// What the page shows for the address in hand: nothing yet, the QR code, or
+// the address written out when the code could not be drawn.
+static void web_show(const char *url) {
+	snprintf(web_shown_url, sizeof(web_shown_url), "%s", url);
+	bool qr_ok = url[0] && lv_qrcode_update(web_qr, url, (uint32_t)strlen(url)) == LV_RESULT_OK;
+	lv_obj_set_hidden(web_qr, !qr_ok);
+	lv_obj_set_hidden(web_address, !url[0] || qr_ok);
+	if (url[0] && !qr_ok) {
+		lv_label_set_text(web_address, url);
+	}
+	lv_label_set_text(web_hint, tr(url[0] ? "lastfm_web_note" : "lastfm_web_preparing"));
+}
+
+// The attempt lasts as long as the page is on screen: begun when it is shown,
+// given up when it is left. Signed in already (the way back from the password
+// page after it worked), there is nothing to begin.
+static void web_loaded_cb(lv_event_t *e) {
+	(void)e;
+	web_show("");
+	lastfm_status_t st;
+	lastfm_get_status(&st);
+	if (st.user[0] || st.state == LASTFM_STATE_SIGNING_IN) {
+		return;
+	}
+	lastfm_web_login_start();
+	waiting_for_login = true;
+}
+
+static void web_unloaded_cb(lv_event_t *e) {
+	(void)e;
+	lastfm_web_login_cancel();
+}
+
+static void web_password_cb(lv_event_t *e) {
+	(void)e;
+	open_password_login();
+}
+
+static void build_web(gui_config_t *cfg) {
+	web_screen = lv_obj_create(NULL);
+	lv_obj_add_style(web_screen, &theme_style_screen, 0);
+
+	settingsrow_title(web_screen, cfg, "lastfm_sign_in");
+	int top = settingsrow_content_top(cfg);
+	int width = cfg->screen_width - 2 * cfg->padding;
+
+	// Fixed black on white with a white border, whatever the theme: a camera
+	// needs the contrast, and the border is the quiet zone the code requires.
+	web_qr = lv_qrcode_create(web_screen);
+	lv_qrcode_set_size(web_qr, WEB_QR_SIZE);
+	lv_qrcode_set_dark_color(web_qr, lv_color_black());
+	lv_qrcode_set_light_color(web_qr, lv_color_white());
+	lv_obj_set_style_border_color(web_qr, lv_color_white(), 0);
+	lv_obj_set_style_border_width(web_qr, WEB_QR_QUIET, 0);
+	lv_obj_set_style_bg_color(web_qr, lv_color_white(), 0);
+	lv_obj_set_style_bg_opa(web_qr, LV_OPA_COVER, 0);
+	lv_obj_align(web_qr, LV_ALIGN_TOP_MID, 0, top + 10);
+
+	// In the code's place when it cannot be drawn.
+	web_address = lv_label_create(web_screen);
+	lv_label_set_long_mode(web_address, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(web_address, width);
+	lv_obj_set_style_text_align(web_address, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_add_style(web_address, &theme_style_text, 0);
+	lv_obj_set_style_text_font(web_address, &font_ui_20, 0);
+	lv_obj_align(web_address, LV_ALIGN_TOP_MID, 0, top + 10);
+	lv_label_set_text(web_address, "");
+
+	web_hint = lv_label_create(web_screen);
+	lv_label_set_long_mode(web_hint, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(web_hint, width);
+	lv_obj_set_style_text_align(web_hint, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_add_style(web_hint, &theme_style_text, 0);
+	lv_obj_set_style_text_font(web_hint, &font_ui_22, 0);
+	lv_obj_align(web_hint, LV_ALIGN_TOP_MID, 0, top + 10 + WEB_QR_SIZE + 2 * WEB_QR_QUIET + 24);
+	lv_label_set_text(web_hint, tr("lastfm_web_preparing"));
+
+	// The other road, for an API account Last.fm still lets sign in that way.
+	lv_obj_t *password = lv_btn_create(web_screen);
+	lv_obj_set_size(password, LV_SIZE_CONTENT, 56);
+	lv_obj_set_style_pad_hor(password, 22, 0);
+	lv_obj_set_style_radius(password, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_shadow_width(password, 0, 0);
+	lv_obj_set_style_border_width(password, 0, 0);
+	lv_obj_add_style(password, &theme_style_card, 0);
+	lv_obj_align(password, LV_ALIGN_BOTTOM_MID, 0, -cfg->padding - 10);
+	lv_obj_add_event_cb(password, web_password_cb, LV_EVENT_CLICKED, NULL);
+
+	lv_obj_t *password_label = lv_label_create(password);
+	lv_obj_add_style(password_label, &theme_style_text, 0);
+	lv_obj_set_style_text_font(password_label, &font_ui_20, 0);
+	lv_label_set_text(password_label, tr("lastfm_use_password"));
+	lv_obj_center(password_label);
+
+	web_show("");
+	lv_obj_add_event_cb(web_screen, web_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+	lv_obj_add_event_cb(web_screen, web_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
+	switcher_attach_back_gesture(web_screen);
+}
+
 static void login_finished(const lastfm_status_t *st) {
 	if (!waiting_for_login) {
 		return;
@@ -287,10 +413,14 @@ static void login_finished(const lastfm_status_t *st) {
 
 	switch (st->login_result) {
 	case LASTFM_LOGIN_OK:
-		if (lv_screen_active() == login_screen) {
-			back_btn_cb(NULL);
+		// Back to the page, past both sign-in pages whichever one it was.
+		if (lv_screen_active() == login_screen || lv_screen_active() == web_screen) {
+			switch_screen_return_to(page_screen);
 		}
 		toast_success("signed_in");
+		break;
+	case LASTFM_LOGIN_EXPIRED:
+		toast_error("lastfm_web_expired");
 		break;
 	case LASTFM_LOGIN_WRONG_CREDENTIALS:
 		toast_error("lastfm_wrong_credentials");
@@ -301,6 +431,19 @@ static void login_finished(const lastfm_status_t *st) {
 	case LASTFM_LOGIN_REFUSED:
 		toast_error(st->detail);
 		break;
+	}
+
+	// The page with the code has nothing left to scan once its attempt has
+	// ended without a session. A code that ran out is replaced by a new one;
+	// after anything else the page is left, with the reason on screen.
+	if (st->login_result != LASTFM_LOGIN_OK && lv_screen_active() == web_screen) {
+		if (st->login_result == LASTFM_LOGIN_EXPIRED) {
+			web_show("");
+			lastfm_web_login_start();
+			waiting_for_login = true;
+		} else {
+			back_btn_cb(NULL);
+		}
 	}
 }
 
@@ -351,10 +494,15 @@ static void tick_cb(lv_timer_t *t) {
 	if (lv_screen_active() == page_screen) {
 		refresh();
 	}
+	// The address arrives a moment after the page is shown.
+	if (lv_screen_active() == web_screen && strcmp(st.web_url, web_shown_url) != 0) {
+		web_show(st.web_url);
+	}
 }
 
 void lastfmsettings_init(gui_config_t *cfg) {
 	build_page(cfg);
+	build_web(cfg);
 	build_login(cfg);
 
 	lastfm_status_t st;

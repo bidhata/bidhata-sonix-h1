@@ -10,6 +10,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "src/gui/audio/peqpage.h"
 #include "src/gui/fonts/fonts.h"
@@ -585,7 +586,15 @@ static void *worker(void *user) {
 		download_profile(job);
 	}
 
-	if (!gui_post(job_done, job)) {
+	// A full queue empties within a pass or two of the interface, so the result
+	// is offered again for a while before it is given up: job_done() is what
+	// takes the busy notice down.
+	bool posted = gui_post(job_done, job);
+	for (int i = 0; !posted && i < 50; i++) {
+		usleep(100 * 1000);
+		posted = gui_post(job_done, job);
+	}
+	if (!posted) {
 		free(job->profile_text);
 		free(job);
 		end_job();

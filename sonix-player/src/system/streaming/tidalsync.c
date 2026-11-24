@@ -80,10 +80,12 @@ void tidalsync_forget(void) {
 // ---------------------------------------------------------------------------
 // the worker
 //
-// One thread, one queue slot. Submitting while a job is already waiting
-// replaces it: these are user taps, and the last one wins. A job already
-// running is always finished -- aborting a request that writes to the account
-// halfway through would leave its state unknown.
+// One thread and a short queue, served in order. A job that writes to the
+// account is never displaced by a later one: its star has already moved in the
+// mirror, and its caller is waiting to hear how it went. A load already waiting
+// is not queued twice. A job already running is always finished -- aborting a
+// request that writes to the account halfway through would leave its state
+// unknown.
 // ---------------------------------------------------------------------------
 
 typedef enum {
@@ -114,8 +116,10 @@ typedef struct {
 
 static pthread_mutex_t job_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t job_ready = PTHREAD_COND_INITIALIZER;
-static job_t pending;
-static bool have_pending;
+#define JOB_QUEUE_MAX 8
+static job_t job_queue[JOB_QUEUE_MAX];
+static int job_queue_head;
+static int job_queue_count;
 static bool worker_started;
 
 static void do_favorites_load(const job_t *job) {
@@ -222,11 +226,12 @@ static void *worker_main(void *arg) {
 
 	for (;;) {
 		pthread_mutex_lock(&job_lock);
-		while (!have_pending) {
+		while (job_queue_count == 0) {
 			pthread_cond_wait(&job_ready, &job_lock);
 		}
-		job_t job = pending;
-		have_pending = false;
+		job_t job = job_queue[job_queue_head];
+		job_queue_head = (job_queue_head + 1) % JOB_QUEUE_MAX;
+		job_queue_count--;
 		pthread_mutex_unlock(&job_lock);
 
 		switch (job.kind) {
@@ -258,6 +263,17 @@ static void *worker_main(void *arg) {
 	return NULL;
 }
 
+// A job that will not run: the star it moved in the mirror goes back, and its
+// caller is told. Called without job_lock, on the submitting thread.
+static void refuse(const job_t *job) {
+	if (job->kind == JOB_FAVORITE_TOGGLE) {
+		mirror_set(job->track_id, !job->want);
+	}
+	if (job->done) {
+		job->done(false, tr("cannot_start_the_request"), job->user);
+	}
+}
+
 static void submit(const job_t *job) {
 	pthread_mutex_lock(&job_lock);
 	if (!worker_started) {
@@ -267,16 +283,34 @@ static void submit(const job_t *job) {
 			worker_started = true;
 		} else {
 			pthread_mutex_unlock(&job_lock);
-			if (job->done) {
-				job->done(false, tr("cannot_start_the_request"), job->user);
-			}
+			refuse(job);
 			return;
 		}
 	}
-	pending = *job;
-	have_pending = true;
-	pthread_cond_signal(&job_ready);
+
+	// A load asks for the whole list again, so one already waiting answers for
+	// this one too.
+	bool is_load = job->kind == JOB_FAVORITES_LOAD || job->kind == JOB_PLAYLISTS_LOAD;
+	bool wanted = true;
+	for (int i = 0; is_load && i < job_queue_count; i++) {
+		if (job_queue[(job_queue_head + i) % JOB_QUEUE_MAX].kind == job->kind) {
+			wanted = false;
+		}
+	}
+	bool queued = false;
+	if (wanted && job_queue_count < JOB_QUEUE_MAX) {
+		job_queue[(job_queue_head + job_queue_count) % JOB_QUEUE_MAX] = *job;
+		job_queue_count++;
+		queued = true;
+		pthread_cond_signal(&job_ready);
+	}
 	pthread_mutex_unlock(&job_lock);
+
+	// Full: a load is simply not made, and is asked for again by whoever still
+	// needs it; a write is reported as failed.
+	if (wanted && !queued && !is_load) {
+		refuse(job);
+	}
 }
 
 // ---------------------------------------------------------------------------

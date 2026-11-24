@@ -51,8 +51,8 @@ void sleeptimer_set_minutes(sleeptimer_kind_t kind, int minutes);
 // kind stops whichever other one was counting.
 void sleeptimer_note_playing(sleeptimer_kind_t kind);
 
-// True while that stretch is actually counting down: the switch is on, a time
-// is set, and that kind is playing.
+// True while that stretch is actually counting down: that kind is playing, and
+// either its switch is on with a time set or the automatic window is open.
 bool sleeptimer_running(sleeptimer_kind_t kind);
 
 // True for any of the three, for a caller that only wants to know whether its
@@ -65,5 +65,36 @@ bool sleeptimer_expired(sleeptimer_kind_t kind);
 
 // What is left of that stretch, in seconds, or 0 when it is not counting.
 int sleeptimer_remaining(sleeptimer_kind_t kind);
+
+// ---------------------------------------------------------------------------
+// The automatic one
+//
+// One switch and one window of the day for all three kinds. While the switch
+// is on and the local time is inside the window, whatever kind is playing
+// counts down as if its own switch were on, over its own length (half an hour
+// for a kind whose length was never chosen). A kind whose own switch is on
+// with a length is left alone: that is the timer described above, at any hour.
+//
+// The window is two times of day in minutes after midnight. An end before the
+// start is a window that crosses midnight; the two being equal is the whole
+// day. With the clock not set there is no local time to compare, and nothing
+// is armed.
+//
+// The window is looked at whenever the player says what is playing, which it
+// does at every poll, so a countdown starts when the window opens over music
+// already playing and is put away when it closes.
+// ---------------------------------------------------------------------------
+
+bool sleeptimer_auto_enabled(void);
+void sleeptimer_set_auto_enabled(bool on);
+
+int sleeptimer_auto_start(void);
+int sleeptimer_auto_end(void);
+void sleeptimer_set_auto_window(int start_minute, int end_minute);
+
+// Somebody pressed a button, so they are not asleep: an automatic countdown
+// starts again from its full length at the next tick. A countdown switched on
+// by hand is not touched. Safe from any thread.
+void sleeptimer_note_activity(void);
 
 #endif /* SLEEPTIMER_H */

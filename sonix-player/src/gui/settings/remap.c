@@ -358,7 +358,7 @@ static lv_obj_t *dialog_heading(lv_obj_t *parent, const char *text) {
 	return label;
 }
 
-// Pills a size down from the settings pages' own: the dialog holds ten of them.
+// Pills a size down from the settings pages' own: the dialog holds a dozen.
 static lv_obj_t *dialog_pill(lv_obj_t *parent, const char *text, int value, lv_event_cb_t cb) {
 	lv_obj_t *pill = settingsrow_pill(parent, text, value, cb);
 	lv_obj_set_height(pill, 46);
@@ -500,9 +500,10 @@ static void open_chooser(keymap_button_t button) {
 
 	keymap_action_t current = keymap_get(button);
 
-	// Six entries, exactly as many as the popover shows: one per action these
-	// buttons can perform, plus "none", since a button pressed by accident in a
-	// pocket is reason enough to disable it.
+	// One entry per action these buttons can perform, plus "none", since a
+	// button pressed by accident in a pocket is reason enough to disable it.
+	// All of them fit the popover (POPOVER_MAX_ITEMS), which scrolls inside its
+	// card if a panel is too short for the list.
 	static popover_item_t items[KEYMAP_ACTION_COUNT];
 	for (int i = 0; i < KEYMAP_ACTION_COUNT; i++) {
 		items[i].label = keymap_action_name((keymap_action_t)i);

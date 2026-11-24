@@ -848,6 +848,15 @@ static void list_poll_cb(lv_timer_t *timer) {
 	}
 	last_job_serial = serial;
 
+	// The serial moves for every job that finishes, the one a newer request
+	// replaced in mid-flight included, and nothing in it says which request the
+	// answer is for. What does tell them apart is that the newer request is
+	// still on its way: the directory is busy again, and this answer is left
+	// for the one that follows it.
+	if (radio_job_state() == RADIO_JOB_BUSY) {
+		return;
+	}
+
 	bool appending = page_append;
 	page_append = false;
 	page_loading = false;

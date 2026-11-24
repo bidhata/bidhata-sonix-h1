@@ -7,13 +7,16 @@
 #include "gbcore.h"
 
 #include <new>
+#include <sstream>
 #include <stdio.h>
 #include <string.h>
 #include <string>
+#include <unistd.h>
 
 #include "core/Cartridge.h"
 #include "core/GearboyCore.h"
 #include "core/Memory.h"
+#include "core/MemoryRule.h"
 #include "core/definitions.h"
 
 // Gearboy expects the host program to define this: its Log_func() checks it to
@@ -29,6 +32,10 @@ struct gb_core {
 	// Key state from the previous frame: the core wants press/release edges
 	// while callers pass a full state mask, so the difference is taken here.
 	uint16_t keys;
+	// A hash of the battery RAM as it was last loaded or written, so a flush
+	// asked for while nothing has changed costs no write to the card.
+	uint32_t ram_hash;
+	bool ram_hash_valid;
 	// The core always needs somewhere to put audio, even when the caller does
 	// not want it: passing NULL would still be written through.
 	s16 scratch[GB_AUDIO_MAX_SAMPLES];
@@ -116,45 +123,163 @@ const char *gb_core_rom_name(gb_core_t *wrap) { return wrap ? wrap->name : ""; }
 
 bool gb_core_is_color(gb_core_t *wrap) { return wrap ? wrap->core->IsCGB() : false; }
 
-// Gearboy tells a directory from a full path with a boolean: with fullPath
-// false it appends the cartridge's file name to whatever it is given, which is
-// the behaviour wanted here. NULL falls back to its default, the file next to
-// the ROM.
-void gb_core_load_ram(gb_core_t *wrap, const char *dir) {
-	if (wrap) {
-		wrap->core->LoadRam(dir && dir[0] ? dir : NULL, false);
+// Where a file of this cartridge goes in `dir`: the ROM's whole file name, its
+// own extension included, with `suffix` after it ("Zelda.gbc.sav"). The
+// extension stays because Games/GB/Zelda.gb and Games/GBC/Zelda.gbc are two
+// cartridges sharing one saves folder.
+//
+// With `legacy` it is the name without the ROM's extension ("Zelda.sav"), the
+// one Gearboy itself gives a save: read when the other does not exist, never
+// written.
+static std::string save_path(GearboyCore *core, const char *dir, const char *suffix, bool legacy) {
+	std::string path = dir;
+	path += "/";
+	path += core->GetCartridge()->GetFileName();
+	if (legacy) {
+		std::string::size_type dot = path.rfind('.');
+		if (dot != std::string::npos) {
+			path.erase(dot);
+		}
 	}
-}
-
-void gb_core_save_ram(gb_core_t *wrap, const char *dir) {
-	if (wrap) {
-		wrap->core->SaveRam(dir && dir[0] ? dir : NULL, false);
-	}
-}
-
-// The save-state path. Gearboy can build it itself, but only inside its own
-// writing functions; it is needed outside them here because the file is opened
-// by this code.
-static std::string state_path(GearboyCore *core, const char *dir, int index) {
-	std::string path;
-	if (dir && dir[0]) {
-		path = dir;
-		path += "/";
-		path += core->GetCartridge()->GetFileName();
-	} else {
-		path = core->GetCartridge()->GetFilePath();
-	}
-
-	std::string::size_type dot = path.rfind('.');
-	if (dot != std::string::npos) {
-		path.replace(dot + 1, path.length() - dot - 1, "state");
-	}
-
-	char suffix[16];
-	snprintf(suffix, sizeof(suffix), "%d", index);
 	path += suffix;
 	return path;
 }
+
+static bool file_exists(const std::string &path) { return access(path.c_str(), F_OK) == 0; }
+
+// The whole file or nothing: written beside its place, flushed to the card and
+// renamed over the old one, so a full card or a power cut leaves the file that
+// was there.
+static bool write_whole_file(const std::string &path, const void *data, size_t size) {
+	std::string tmp = path + ".new";
+	FILE *f = fopen(tmp.c_str(), "wb");
+	if (!f) {
+		return false;
+	}
+	bool ok = fwrite(data, 1, size, f) == size;
+	ok = fflush(f) == 0 && ok;
+	ok = fsync(fileno(f)) == 0 && ok;
+	// The close matters as much as the write: it is the last place a failed
+	// write is reported.
+	if (fclose(f) != 0) {
+		ok = false;
+	}
+	if (ok && rename(tmp.c_str(), path.c_str()) != 0) {
+		ok = false;
+	}
+	if (!ok) {
+		remove(tmp.c_str());
+	}
+	return ok;
+}
+
+// The battery RAM as the core writes it to a .sav, in memory. False for a
+// cartridge that keeps nothing.
+static bool ram_image(GearboyCore *core, std::string &out, uint32_t *hash) {
+	Cartridge *cart = core->GetCartridge();
+	Memory *mem = core->GetMemory();
+	MemoryRule *rule = mem ? mem->GetCurrentRule() : NULL;
+	if (!cart || !rule || !cart->IsLoadedROM()) {
+		return false;
+	}
+	if (!cart->HasBattery() && rule->GetMapperType() != Cartridge::CartridgeMBC6) {
+		return false;
+	}
+
+	std::ostringstream stream(std::ios::out | std::ios::binary);
+	rule->SaveRam(stream);
+	out = stream.str();
+	if (out.empty()) {
+		return false;
+	}
+
+	// Over the RAM alone: a clock cartridge appends its clock, which differs
+	// at every call and is not a reason to write.
+	size_t n = rule->GetRamSize();
+	if (n == 0 || n > out.size()) {
+		n = out.size();
+	}
+	uint32_t h = 2166136261u; // FNV-1a
+	for (size_t i = 0; i < n; i++) {
+		h = (h ^ (uint8_t)out[i]) * 16777619u;
+	}
+	*hash = h;
+	return true;
+}
+
+// Gearboy tells a directory from a full path with a boolean: with fullPath
+// false it appends the cartridge's file name to whatever it is given and swaps
+// the extension for "sav": the legacy name, read when there is no file under
+// the full one. NULL falls back to its default, the file next to the ROM.
+void gb_core_load_ram(gb_core_t *wrap, const char *dir) {
+	if (!wrap) {
+		return;
+	}
+	if (dir && dir[0] && wrap->core->GetCartridge()) {
+		std::string path = save_path(wrap->core, dir, ".sav", false);
+		if (file_exists(path)) {
+			wrap->core->LoadRam(path.c_str(), true);
+		} else {
+			wrap->core->LoadRam(dir, false);
+		}
+	} else {
+		wrap->core->LoadRam(NULL, false);
+	}
+
+	std::string image;
+	wrap->ram_hash_valid = ram_image(wrap->core, image, &wrap->ram_hash);
+}
+
+static bool save_ram(gb_core_t *wrap, const char *dir, bool only_if_changed) {
+	if (!wrap) {
+		return false;
+	}
+	std::string image;
+	uint32_t hash = 0;
+	if (!ram_image(wrap->core, image, &hash)) {
+		return true; // nothing to keep
+	}
+	if (only_if_changed && wrap->ram_hash_valid && hash == wrap->ram_hash) {
+		return true;
+	}
+	if (!dir || !dir[0]) {
+		// No saves directory: the core's own file, next to the ROM.
+		wrap->core->SaveRam(NULL, false);
+	} else if (!write_whole_file(save_path(wrap->core, dir, ".sav", false), image.data(), image.size())) {
+		return false;
+	}
+	wrap->ram_hash = hash;
+	wrap->ram_hash_valid = true;
+	return true;
+}
+
+bool gb_core_save_ram(gb_core_t *wrap, const char *dir) { return save_ram(wrap, dir, false); }
+
+bool gb_core_save_ram_if_changed(gb_core_t *wrap, const char *dir) { return save_ram(wrap, dir, true); }
+
+// The save-state path: the ROM's file name with ".state<index>" after it, or,
+// with `legacy`, in place of its extension (see save_path). Without a saves
+// directory it is the file next to the ROM, extension replaced.
+static std::string state_path(GearboyCore *core, const char *dir, int index, bool legacy) {
+	char suffix[24];
+	snprintf(suffix, sizeof(suffix), ".state%d", index);
+
+	if (dir && dir[0]) {
+		return save_path(core, dir, suffix, legacy);
+	}
+
+	std::string path = core->GetCartridge()->GetFilePath();
+	std::string::size_type dot = path.rfind('.');
+	if (dot != std::string::npos) {
+		path.erase(dot);
+	}
+	path += suffix;
+	return path;
+}
+
+// Nothing the core writes comes near this; a file larger is not a state, and
+// its size is not a number to allocate by.
+#define STATE_MAX_BYTES (8 * 1024 * 1024)
 
 // The state is serialised through a memory buffer instead of the std::ofstream
 // Gearboy would use on its own.
@@ -189,19 +314,7 @@ bool gb_core_save_state(gb_core_t *wrap, const char *dir, int index) {
 
 	bool ok = wrap->core->SaveState(buffer, size, false);
 	if (ok) {
-		std::string path = state_path(wrap->core, dir, index);
-		FILE *f = fopen(path.c_str(), "wb");
-		if (f) {
-			ok = fwrite(buffer, 1, size, f) == size;
-			// The close matters as much as the write: without checking it, a
-			// device powered off straight after is left with a half state
-			// file.
-			if (fclose(f) != 0) {
-				ok = false;
-			}
-		} else {
-			ok = false;
-		}
+		ok = write_whole_file(state_path(wrap->core, dir, index, false), buffer, size);
 	}
 
 	delete[] buffer;
@@ -215,7 +328,10 @@ bool gb_core_load_state(gb_core_t *wrap, const char *dir, int index) {
 		return false;
 	}
 
-	std::string path = state_path(wrap->core, dir, index);
+	std::string path = state_path(wrap->core, dir, index, false);
+	if (!file_exists(path)) {
+		path = state_path(wrap->core, dir, index, true);
+	}
 	FILE *f = fopen(path.c_str(), "rb");
 	if (!f) {
 		return false;
@@ -224,7 +340,7 @@ bool gb_core_load_state(gb_core_t *wrap, const char *dir, int index) {
 	fseek(f, 0, SEEK_END);
 	long size = ftell(f);
 	fseek(f, 0, SEEK_SET);
-	if (size <= 0) {
+	if (size <= 0 || size > STATE_MAX_BYTES) {
 		fclose(f);
 		return false;
 	}

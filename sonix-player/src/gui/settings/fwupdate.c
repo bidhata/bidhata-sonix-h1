@@ -1,6 +1,7 @@
 #include "fwupdate.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lvgl/lvgl.h"
@@ -13,6 +14,7 @@
 #include "src/system/device/ota.h"
 #include "src/system/device/power.h"
 #include "src/system/device/sysinfo.h"
+#include "src/system/device/system.h"
 
 #define CARD_W 420
 #define BUTTON_H 64
@@ -28,6 +30,23 @@
 
 // Between "Installing..." being drawn and the screen fading out.
 #define INSTALL_DELAY_MS 600
+
+#define MIN_BATTERY_PERCENT 30
+
+// An update that loses power halfway leaves the device in recovery with a
+// half-written kernel, the one failure here that cannot be undone from the UI.
+// An unreadable level must not block the update: the reader returns "!!" when
+// it cannot find the gauge (the host build, and any firmware naming that sysfs
+// node differently), and refusing to update over a battery nobody can measure
+// would be the opposite of useful.
+bool fwupdate_battery_ok(void) {
+	char *percent_text = read_battery_percent();
+	int percent = 100;
+	if (percent_text && percent_text[0] >= '0' && percent_text[0] <= '9') {
+		percent = atoi(percent_text);
+	}
+	return percent >= MIN_BATTERY_PERCENT || read_battery_charging();
+}
 
 typedef void (*action_fn)(void);
 
@@ -506,6 +525,11 @@ static void show_downloading(void) {
 }
 
 static void download_clicked(void) {
+	// The card may have been open a long while since the level was looked at.
+	if (!fwupdate_battery_ok()) {
+		show_notice(tr("system_battery_warning"));
+		return;
+	}
 	if (!ota_download_start()) {
 		show_notice(tr("system_update_busy"));
 		return;
@@ -543,6 +567,12 @@ static void show_release(void) {
 
 static void install_cb(lv_timer_t *timer) {
 	(void)timer;
+	// The download ran on the battery. The file is on the card by now, so the
+	// update can still be made from there once the player is on the charger.
+	if (!fwupdate_battery_ok()) {
+		show_notice(tr("system_battery_warning"));
+		return;
+	}
 	firmware_update_start();
 	// Returns only on the host build.
 	close_card();
@@ -642,6 +672,10 @@ static void sd_run(void *unused) {
 	char path[512];
 	if (!firmware_update_file_find(path, sizeof(path))) {
 		gui_notify_popup("system_update_file_missing");
+		return;
+	}
+	if (!fwupdate_battery_ok()) {
+		gui_notify_popup("system_battery_warning");
 		return;
 	}
 	printf("firmware: update file %s\n", path);

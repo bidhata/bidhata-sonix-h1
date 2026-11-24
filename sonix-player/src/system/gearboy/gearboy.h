@@ -27,8 +27,8 @@
 // (usually the database's). False when the ROM does not load or memory runs
 // out.
 //
-// Stops music playback: a PCM has one writer, and a game over music is not
-// what anyone wants anyway.
+// Stops music playback, and a radio station if one is playing: a PCM has one
+// writer, and a game over music is not what anyone wants anyway.
 bool gearboy_start(const char *rom_path, const char *title);
 
 // Stops the game and saves battery-backed RAM. Returns once the thread has
@@ -104,6 +104,12 @@ void gearboy_request_loadstate(void);
 //  -1  save failed    -2  load failed
 // The page polls it each tick and turns it into a notice.
 int gearboy_take_state_result(void);
+
+// Writes the battery-backed RAM to the card now and returns when it is there,
+// or after a second. For whoever is about to switch the device off with a game
+// still open; the game itself goes on. Nothing happens with no game running.
+// Callable from any thread but the emulator's own.
+void gearboy_save_now(void);
 
 // Rereads palette, shader and colour correction from config and applies them,
 // including mid-game: the core thread picks up palette and correction between

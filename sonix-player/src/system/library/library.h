@@ -554,6 +554,24 @@ bool library_index_buckets(const library_index_t *ix, int counts[LIBRARY_INDEX_B
 // with a `path` (a track to take the cover from) and an `artist` (the album's).
 int library_index_window(const library_index_t *ix, int offset, int count, library_row_cb cb, void *user);
 
+// The same read with each row's length: `length_ms` is how long the track
+// plays, in milliseconds, as the scan measured it, and 0 when the index does
+// not say -- a row written before lengths were kept, a file whose length
+// cannot be had without reading it through, a row that is not a track. A
+// caller shows nothing for 0. A playlist entry the library does not have
+// answers with the seconds written down with it. No query beyond the one the
+// row already costs.
+typedef bool (*library_timed_row_cb)(const char *name, const char *path, const char *artist, int length_ms, void *user);
+int library_index_window_timed(const library_index_t *ix, int offset, int count, library_timed_row_cb cb, void *user);
+
+// How long every track of the handle plays together, in milliseconds, and how
+// many of them have no length (`unknown`; they add nothing to the total, so the
+// total is the whole only when this is 0). One pass over the rows the handle
+// holds, by row id: a few milliseconds for an album. False, with both at 0, on
+// a stale handle and on a list that is not of tracks. Either pointer may be
+// NULL.
+bool library_index_length(const library_index_t *ix, long long *total_ms, int *unknown);
+
 // A second handle over the same rows, without asking the database for the
 // sort again: the row ids are simply copied. What the playback queue is given
 // when a list is started, so the queue does not have to be a second copy of the

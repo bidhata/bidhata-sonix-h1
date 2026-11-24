@@ -1,5 +1,6 @@
 #include "config.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +56,11 @@ static config_entry_t ebook_entries[EBOOK_MAX_ENTRIES];
 static config_store_t g_main = {main_entries, CONFIG_MAX_ENTRIES, 0, "", false, "config"};
 static config_store_t g_ebook = {ebook_entries, EBOOK_MAX_ENTRIES, 0, "", false, "ebook config"};
 
+// One lock for both stores: the settings are read and written from the
+// interface thread and from workers (the network clock, the radios), and a
+// save walks the whole table. The functions named *_locked expect it held.
+static pthread_mutex_t store_lock = PTHREAD_MUTEX_INITIALIZER;
+
 config_store_t *config_main_store(void) { return &g_main; }
 config_store_t *config_ebook_store(void) { return &g_ebook; }
 
@@ -87,18 +93,23 @@ static config_entry_t *find(config_store_t *store, const char *section, const ch
 	return NULL;
 }
 
+static void store_set_locked(config_store_t *store, const char *section, const char *key, const char *value);
+
 bool config_store_init(config_store_t *store, const char *path) {
+	pthread_mutex_lock(&store_lock);
 	store->count = 0;
 	store->dirty = false;
 	store->path[0] = '\0';
 
 	if (!path || !path[0]) {
+		pthread_mutex_unlock(&store_lock);
 		return false;
 	}
 	snprintf(store->path, sizeof(store->path), "%s", path);
 
 	FILE *f = fopen(store->path, "r");
 	if (!f) {
+		pthread_mutex_unlock(&store_lock);
 		printf("%s: %s not there yet, starting from defaults\n", store->name, store->path);
 		return false;
 	}
@@ -128,35 +139,46 @@ bool config_store_init(config_store_t *store, const char *path) {
 		}
 
 		*equals = '\0';
-		config_store_set(store, section, trim(text), trim(equals + 1));
+		store_set_locked(store, section, trim(text), trim(equals + 1));
 	}
 
 	fclose(f);
 	store->dirty = false; // what was just read is by definition already on disk
+	int count = store->count;
+	pthread_mutex_unlock(&store_lock);
 
-	printf("%s: loaded %d settings from %s\n", store->name, store->count, store->path);
+	printf("%s: loaded %d settings from %s\n", store->name, count, store->path);
 	return true;
 }
 
 bool config_init(const char *path) { return config_store_init(&g_main, path); }
 
 const char *config_store_get(config_store_t *store, const char *section, const char *key, const char *fallback) {
+	pthread_mutex_lock(&store_lock);
 	config_entry_t *entry = find(store, section, key);
+	pthread_mutex_unlock(&store_lock);
+	// An entry stays where it was made (only config_store_move_section, at
+	// startup, moves any) and its text is rewritten in place, so the pointer
+	// stays valid after the lock is let go.
 	return entry ? entry->value : fallback;
 }
 
 long config_store_get_int(config_store_t *store, const char *section, const char *key, long fallback) {
-	const char *value = config_store_get(store, section, key, NULL);
-	if (!value || !value[0]) {
-		return fallback;
+	pthread_mutex_lock(&store_lock);
+	config_entry_t *entry = find(store, section, key);
+	long result = fallback;
+	if (entry && entry->value[0]) {
+		char *end = NULL;
+		long parsed = strtol(entry->value, &end, 10);
+		if (end && end != entry->value) {
+			result = parsed;
+		}
 	}
-
-	char *end = NULL;
-	long parsed = strtol(value, &end, 10);
-	return (end && end != value) ? parsed : fallback;
+	pthread_mutex_unlock(&store_lock);
+	return result;
 }
 
-void config_store_set(config_store_t *store, const char *section, const char *key, const char *value) {
+static void store_set_locked(config_store_t *store, const char *section, const char *key, const char *value) {
 	if (!store || !section || !key || !value) {
 		return;
 	}
@@ -183,6 +205,12 @@ void config_store_set(config_store_t *store, const char *section, const char *ke
 	store->dirty = true;
 }
 
+void config_store_set(config_store_t *store, const char *section, const char *key, const char *value) {
+	pthread_mutex_lock(&store_lock);
+	store_set_locked(store, section, key, value);
+	pthread_mutex_unlock(&store_lock);
+}
+
 void config_store_set_int(config_store_t *store, const char *section, const char *key, long value) {
 	char text[32];
 	snprintf(text, sizeof(text), "%ld", value);
@@ -198,12 +226,15 @@ long config_get_int(const char *section, const char *key, long fallback) {
 }
 
 bool config_get_bool(const char *section, const char *key, bool fallback) {
-	const char *value = config_get(section, key, NULL);
-	if (!value || !value[0]) {
+	pthread_mutex_lock(&store_lock);
+	config_entry_t *entry = find(&g_main, section, key);
+	char first = entry ? entry->value[0] : '\0';
+	pthread_mutex_unlock(&store_lock);
+	if (!first) {
 		return fallback;
 	}
 
-	return value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+	return first == '1' || first == 't' || first == 'T' || first == 'y' || first == 'Y';
 }
 
 void config_set(const char *section, const char *key, const char *value) {
@@ -226,11 +257,12 @@ int config_store_move_section(config_store_t *from, config_store_t *to, const ch
 	if (!from || !to || !section) {
 		return 0;
 	}
+	pthread_mutex_lock(&store_lock);
 	int moved = 0;
 	int kept = 0;
 	for (int i = 0; i < from->count; i++) {
 		if (strcmp(from->entries[i].section, section) == 0) {
-			config_store_set(to, section, from->entries[i].key, from->entries[i].value);
+			store_set_locked(to, section, from->entries[i].key, from->entries[i].value);
 			moved++;
 			continue;
 		}
@@ -243,11 +275,17 @@ int config_store_move_section(config_store_t *from, config_store_t *to, const ch
 		from->count = kept;
 		from->dirty = true;
 	}
+	pthread_mutex_unlock(&store_lock);
 	return moved;
 }
 
 bool config_store_save(config_store_t *store) {
-	if (!store || !store->path[0] || !store->dirty) {
+	if (!store) {
+		return true;
+	}
+	pthread_mutex_lock(&store_lock);
+	if (!store->path[0] || !store->dirty) {
+		pthread_mutex_unlock(&store_lock);
 		return true;
 	}
 
@@ -259,6 +297,7 @@ bool config_store_save(config_store_t *store) {
 
 	FILE *f = fopen(temp, "w");
 	if (!f) {
+		pthread_mutex_unlock(&store_lock);
 		fprintf(stderr, "%s: cannot write %s: keeping settings in memory only\n", store->name, temp);
 		return false;
 	}
@@ -286,16 +325,22 @@ bool config_store_save(config_store_t *store) {
 		}
 	}
 
+	// On the flash before the rename: UBIFS does not write a file's data out
+	// ahead of a rename over it, and a power cut between the two leaves the
+	// settings file there and empty.
 	bool ok = (fflush(f) == 0);
-	fclose(f);
+	ok = fsync(fileno(f)) == 0 && ok;
+	ok = fclose(f) == 0 && ok;
 
 	if (!ok || rename(temp, store->path) != 0) {
 		unlink(temp);
+		pthread_mutex_unlock(&store_lock);
 		fprintf(stderr, "%s: could not replace %s\n", store->name, store->path);
 		return false;
 	}
 
 	store->dirty = false;
+	pthread_mutex_unlock(&store_lock);
 	return true;
 }
 

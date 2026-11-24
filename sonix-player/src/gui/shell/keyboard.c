@@ -254,7 +254,7 @@ static bool refresh_registered;
 // the accent changes at runtime (Appearance > Accent colour), so the fields
 // have to be reachable when it does -- LVGL repaints styles it owns, but this
 // caret is a set of local style properties on each field.
-#define KB_MAX_CARETS 12
+#define KB_MAX_CARETS 48
 static lv_obj_t *caret_fields[KB_MAX_CARETS];
 static int caret_field_count;
 
@@ -649,6 +649,13 @@ static void kb_layouts_cb(lv_event_t *e) {
 	if (!kb) {
 		return;
 	}
+	// A fresh press on the key. The click of an earlier hold may never have
+	// come (the tap guard drops the click of a finger that moved), and the flag
+	// it would have cleared must not swallow this press's own click.
+	if (lv_event_get_code(e) == LV_EVENT_PRESSED) {
+		kb->mode_long_pressed = false;
+		return;
+	}
 
 	popover_item_t items[KB_LAYOUT_COUNT];
 	int count = 0;
@@ -799,13 +806,18 @@ static void kb_t9_key_cb(lv_event_t *e) {
 		return;
 	}
 	keyboard_t *kb = ref->kb;
-	if (kb->flick_consumed) {
-		kb->flick_consumed = false; // the release was a flick, already written
-		return;
-	}
 	int k = ref->index;
 	if (k < 0 || k >= KB_T9_MAX_KEYS) {
 		return;
+	}
+	if (kb->flick_consumed) {
+		kb->flick_consumed = false;
+		// The release was a flick, already written. Only for the kana key that
+		// was flicked: the keys of the T9 panel share this handler, and a flag
+		// left standing by a flick whose click never came is not theirs.
+		if (lv_event_get_current_target(e) == kb->kp_btn[k]) {
+			return;
+		}
 	}
 
 	// The current mode's cycle: letters from the alphabet in use, or digits
@@ -827,7 +839,18 @@ static void kb_t9_key_cb(lv_event_t *e) {
 		kb->t9_tap = 0;
 	}
 
+	uint32_t before = lv_textarea_get_cursor_pos(kb->field);
 	lv_textarea_add_text(kb->field, kb_t9_step(kb, k, kb->t9_tap));
+	if (lv_textarea_get_cursor_pos(kb->field) == before) {
+		// A field at its maximum length took nothing: no character of this key
+		// is in it, so there is none for the next tap to replace.
+		kb->t9_last_key = -1;
+		kb->t9_tap = 0;
+		if (kb->t9_timer) {
+			lv_timer_pause(kb->t9_timer);
+		}
+		return;
+	}
 	kb_cand_refresh(kb);
 
 	if (kb->t9_timer) {
@@ -1531,6 +1554,7 @@ static void kb_build_japanese(keyboard_t *kb) {
 			lv_obj_t *mode = kb_make_key(prow, kp_w, kb_t9_mode_cb, kb);
 			lv_label_set_text(kb_key_label(mode), "123");
 			lv_obj_add_event_cb(mode, kb_layouts_cb, LV_EVENT_LONG_PRESSED, kb);
+			lv_obj_add_event_cb(mode, kb_layouts_cb, LV_EVENT_PRESSED, kb);
 		} else {
 			lv_obj_t *space = kb_make_key(prow, kp_w, kb_t9_space_cb, kb);
 			lv_label_set_text(kb_key_label(space), "\xe7\xa9\xba\xe7\x99\xbd"); // the word for "space", as on a Japanese phone
@@ -1719,6 +1743,7 @@ keyboard_t *keyboard_create(lv_obj_t *parent, int width, int height, lv_obj_t *f
 	kb->mode_label = kb_key_label(mode);
 	// Held rather than tapped, the same key offers the other alphabets in use.
 	lv_obj_add_event_cb(mode, kb_layouts_cb, LV_EVENT_LONG_PRESSED, kb);
+	lv_obj_add_event_cb(mode, kb_layouts_cb, LV_EVENT_PRESSED, kb);
 	kb->qwerty_row4 = row4;
 	lv_obj_t *space = kb_make_key(row4, 0, kb_space_cb, kb); // grows
 	kb_key_icon(space, &icon_space);
@@ -1772,6 +1797,7 @@ keyboard_t *keyboard_create(lv_obj_t *parent, int width, int height, lv_obj_t *f
 	lv_obj_t *t9_mode = kb_make_key(t9_row4, 84, kb_t9_mode_cb, kb);
 	kb->t9_mode_label = kb_key_label(t9_mode);
 	lv_obj_add_event_cb(t9_mode, kb_layouts_cb, LV_EVENT_LONG_PRESSED, kb);
+	lv_obj_add_event_cb(t9_mode, kb_layouts_cb, LV_EVENT_PRESSED, kb);
 	kb->t9_shift_btn = kb_make_key(t9_row4, key_w + 14, kb_t9_shift_cb, kb);
 	kb->t9_shift_icon = kb_key_icon(kb->t9_shift_btn, &icon_shift);
 	// The "0" that takes the shift icon's place in number mode.
@@ -1947,6 +1973,10 @@ void keyboard_style_caret(lv_obj_t *field) {
 	if (!known && caret_field_count < KB_MAX_CARETS) {
 		caret_fields[caret_field_count++] = field;
 		kb_register_refresh();
+	} else if (!known) {
+		// Not silent: what it costs is a caret that keeps the accent it was
+		// styled with, which nobody sees until the accent is changed.
+		fprintf(stderr, "keyboard: no room for another caret (the list holds %d)\n", KB_MAX_CARETS);
 	}
 
 	const lv_style_selector_t parts[] = {LV_PART_CURSOR, LV_PART_CURSOR | LV_STATE_FOCUSED};

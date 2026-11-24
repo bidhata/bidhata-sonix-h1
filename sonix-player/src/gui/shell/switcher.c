@@ -154,6 +154,7 @@ static bool back_anim_running;
 static lv_point_t back_drag_start;
 static lv_obj_t *back_underlay;			// full-screen container on the bottom layer
 static lv_draw_buf_t *back_snapshot;	// the previous page, rendered once
+static lv_obj_t *back_drag_screen;		// the page an engaged drag is moving
 
 bool switcher_back_drag_active(void) { return back_drag_click_guard; }
 
@@ -300,7 +301,12 @@ static void back_anim_exec_cb(void *var, int32_t v) {
 
 static void back_anim_commit_done_cb(lv_anim_t *a) {
 	lv_obj_t *screen = (lv_obj_t *)a->var;
-	back_btn_cb(NULL); // pops history / walks the browser up, loads the page below
+	// Only while the page that was dragged is still the one on show, with no
+	// player over it: anything else arrived during the slide, and going back
+	// now would leave that instead.
+	if (lv_screen_active() == screen && !player_sheet_is_open()) {
+		back_btn_cb(NULL); // pops history / walks the browser up, loads the page below
+	}
 	lv_obj_set_x(screen, 0);
 	back_btn_set_drag_offset(0);
 	back_underlay_destroy();
@@ -314,6 +320,28 @@ static void back_anim_cancel_done_cb(lv_anim_t *a) {
 	back_underlay_destroy();
 	back_anim_running = false;
 	back_btn_sync_visibility();
+}
+
+// Something other than the finger changed what is on show while a drag was
+// engaged: another page was loaded, or the player came up over this one. Work
+// posted from another thread does both (a track that has finished resolving
+// opens the player), and LVGL goes on sending this press to the object it
+// started on.
+static bool back_drag_stale(void) { return lv_screen_active() != back_drag_screen || player_sheet_is_open(); }
+
+// Lets go of an engaged drag without going back: the page it was moving is put
+// where it belongs and the picture under it is taken away.
+static void back_drag_abandon(void) {
+	back_dragging = false;
+	back_drag_engaged = false;
+	if (back_drag_screen) {
+		lv_obj_set_x(back_drag_screen, 0);
+	}
+	back_btn_set_drag_offset(0);
+	back_underlay_destroy();
+	back_btn_sync_visibility();
+	// Deferred for the same reason as at the release below.
+	lv_async_call(back_drag_click_guard_clear_cb, NULL);
 }
 
 static bool back_gesture_off;
@@ -360,6 +388,10 @@ static void back_drag_cb(lv_event_t *e) {
 	int dx = point.x - back_drag_start.x;
 
 	if (code == LV_EVENT_PRESSING) {
+		if (back_drag_engaged && back_drag_stale()) {
+			back_drag_abandon();
+			return;
+		}
 		if (!back_drag_engaged) {
 			// Vertical scrolling must still work: the moment LVGL has begun
 			// scrolling something, this press belongs to the scroll, full
@@ -384,10 +416,11 @@ static void back_drag_cb(lv_event_t *e) {
 			}
 			back_drag_engaged = true;
 			back_drag_click_guard = true;
+			back_drag_screen = lv_screen_active();
 			back_underlay_build();
 		}
 
-		lv_obj_set_x(lv_screen_active(), dx > 0 ? dx : 0);
+		lv_obj_set_x(back_drag_screen, dx > 0 ? dx : 0);
 		back_btn_set_drag_offset(dx > 0 ? dx : 0);
 		return;
 	}
@@ -397,9 +430,13 @@ static void back_drag_cb(lv_event_t *e) {
 		if (!back_drag_engaged) {
 			return;
 		}
+		if (back_drag_stale()) {
+			back_drag_abandon();
+			return;
+		}
 		back_drag_engaged = false;
 
-		lv_obj_t *screen = lv_screen_active();
+		lv_obj_t *screen = back_drag_screen;
 		int width = lv_obj_get_width(screen);
 		int from = dx > 0 ? dx : 0;
 		bool go = dx > width / BACK_COMMIT_FRACTION;

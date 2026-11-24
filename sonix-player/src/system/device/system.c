@@ -29,10 +29,12 @@
 #include "src/system/audio/audio.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/playback/device_state.h"
+#include "src/system/playback/audiobook.h"
 #include "src/system/library/audiobookdb.h"
 #include "src/system/audio/eq.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/gearboy/gbdb.h"
+#include "src/system/gearboy/gearboy.h"
 #include "src/system/input/hookclicks.h"
 #include "src/system/input/keymap.h"
 #include "src/system/core/panel.h"
@@ -788,7 +790,7 @@ static void check_and_mount_existing_sd(storage_config_t *storage_cfg, const sys
 // bare "mmcblk" prefix, so one card produces TWO events (the disk and its
 // partition) and each half would otherwise run twice, the second call recording
 // the state the first had already cleared.
-static bool card_attached = true; // the card is mounted before this thread starts
+static bool card_attached = true; // until system_start_services() finds no card mounted
 
 bool storage_card_attached(void) { return card_attached; }
 
@@ -856,6 +858,9 @@ static void card_databases_attach(const char *root) {
 	podcaststate_set_root(root);
 	dlna_set_root(root);
 	gbdb_set_root(root);
+	// The radio's own database, when no card was there to open it on at startup;
+	// a store already open is left as it is.
+	radio_store_open(root);
 
 	// The log, from the setting rather than from a remembered flag: a flag does
 	// not survive two remove events, and a failed reopen consumes it for good.
@@ -893,6 +898,20 @@ static pthread_mutex_t card_lock = PTHREAD_MUTEX_INITIALIZER;
 static storage_config_t *g_storage_cfg;
 static system_runtime_t *g_runtime;
 static bool card_released; // under card_lock: set for the power-off, never cleared
+
+bool storage_card_usable(void) {
+	if (!sd_root[0]) {
+		return false;
+	}
+	// Where the mount is somebody else's (the simulator's folder), the root is
+	// simply there.
+	if (!g_storage_cfg || !g_storage_cfg->manage_mount) {
+		return true;
+	}
+	// The mount point is a directory on the internal flash whenever nothing is
+	// mounted on it: card_attached alone does not say so during an export.
+	return card_attached && !usb_storage_active() && is_mounted(sd_root);
+}
 
 void storage_recheck_card(void) {
 	if (!g_storage_cfg || !g_storage_cfg->manage_mount || getenv("SONIX_NO_MOUNT")) {
@@ -1033,6 +1052,11 @@ void storage_release_for_shutdown(void) {
 		return;
 	}
 
+	// A game still running writes its cartridge RAM to the card first; nothing
+	// happens when none is. Not gearboy_stop(): the game's page still shows
+	// the picture that would free.
+	gearboy_save_now();
+
 	pthread_mutex_lock(&card_lock);
 	bool already = card_released;
 	card_released = true;
@@ -1115,7 +1139,9 @@ void *sd_hotplug_thread(void *arg) {
 			if (strstr(buf, "add@")) {
 				printf("SD Card Inserted\n");
 				pthread_mutex_lock(&card_lock);
-				if (card_released) {
+				// Released for the power-off, or handed to a computer: the
+				// export's own restore mounts it again when the host lets go.
+				if (card_released || usb_storage_active()) {
 					pthread_mutex_unlock(&card_lock);
 					continue;
 				}
@@ -1473,9 +1499,19 @@ static bool mapped_action_repeats(keymap_button_t button) {
 #define SEEK_REPEAT_MS 250	 // and another step every quarter second
 #define SEEK_STEP_SECONDS 5.0
 
+// The two jumps are held the same way as the two skips: a short press jumps, a
+// long one runs through the track in the jump's direction.
+static bool action_seeks_forward(keymap_action_t action) {
+	return action == KEYMAP_ACTION_NEXT || action == KEYMAP_ACTION_JUMP_FORWARD;
+}
+
+static bool action_seeks_back(keymap_action_t action) {
+	return action == KEYMAP_ACTION_PREV || action == KEYMAP_ACTION_JUMP_BACK;
+}
+
 static bool mapped_action_seeks(keymap_button_t button) {
 	keymap_action_t action = effective_action(button);
-	return action == KEYMAP_ACTION_NEXT || action == KEYMAP_ACTION_PREV;
+	return action_seeks_forward(action) || action_seeks_back(action);
 }
 
 // One step, in whichever direction the button means. Nothing is asked of the
@@ -1485,7 +1521,7 @@ static bool mapped_action_seeks(keymap_button_t button) {
 // neither a length nor a point to come back to.
 static void seek_step(keymap_button_t button) {
 	keymap_action_t action = effective_action(button);
-	if (action != KEYMAP_ACTION_NEXT && action != KEYMAP_ACTION_PREV) {
+	if (!action_seeks_forward(action) && !action_seeks_back(action)) {
 		return;
 	}
 
@@ -1495,7 +1531,35 @@ static void seek_step(keymap_button_t button) {
 		return;
 	}
 
-	device_state_scrub_by((action == KEYMAP_ACTION_NEXT) ? SEEK_STEP_SECONDS : -SEEK_STEP_SECONDS);
+	device_state_scrub_by(action_seeks_forward(action) ? SEEK_STEP_SECONDS : -SEEK_STEP_SECONDS);
+}
+
+// A jump back or forward inside what is playing (keymap.h), for the buttons
+// mapped to one and for a hold on the cable remote. It is a scrub of one step,
+// committed at once: scrub_by clamps to the start and to just short of the end
+// and commit carries the seek over to the interface thread, the same road a
+// held skip button takes. Presses that come faster than the seeks add up in the
+// open scrub and land as one seek.
+//
+// Nothing happens on a live stream, which has no position, nor with playback
+// stopped: a seek there would start the track again, and a button that jumps
+// must not be a second play button.
+//
+// On an audiobook the distance is the book's own setting, the one its two
+// buttons on screen use.
+static void jump_by(bool forward) {
+	device_state_t state;
+	device_state_get(&state);
+	if (state.live || state.progress_total_secs <= 0 || state.status == AUDIO_STATUS_STOPPED) {
+		return;
+	}
+
+	double seconds = forward ? KEYMAP_JUMP_FORWARD_SECONDS : KEYMAP_JUMP_BACK_SECONDS;
+	if (audiobook_is_playing()) {
+		seconds = forward ? audiobook_skip_forward() : audiobook_skip_back();
+	}
+	device_state_scrub_by(forward ? seconds : -seconds);
+	device_state_scrub_commit();
 }
 
 // WHAT REPEATS IS THE ACTION, NOT THE KEY.
@@ -1560,6 +1624,12 @@ static void run_mapped_action(keymap_button_t button) {
 	case KEYMAP_ACTION_VOLUME_DOWN:
 		apply_volume_step(KEY_VOLUMEDOWN);
 		break;
+	case KEYMAP_ACTION_JUMP_BACK:
+		jump_by(false);
+		break;
+	case KEYMAP_ACTION_JUMP_FORWARD:
+		jump_by(true);
+		break;
 	case KEYMAP_ACTION_NONE:
 	default:
 		break;
@@ -1596,6 +1666,22 @@ static void handle_key_press(const char *node, int code, bool headset) {
 
 	case KEY_PREVIOUSSONG:
 		gui_notify_key(GUI_KEY_PREV);
+		break;
+
+	// The cable remote's centre button held down. sa_earpods_adc names the
+	// two holds after what an Apple remote does with them, and reports each
+	// as one key, down for as long as the hold lasts: KEY_FASTFORWARD for a
+	// plain hold, KEY_REWIND for a click followed by a hold. Here the plain
+	// hold, the one a thumb finds without counting, is the jump back -- the
+	// sentence that was missed -- and click-and-hold is the jump forward. One
+	// jump per hold. A hold never arrives as clicks as well: the module
+	// reports one or the other.
+	case KEY_FASTFORWARD:
+		jump_by(false);
+		break;
+
+	case KEY_REWIND:
+		jump_by(true);
 		break;
 
 	default:
@@ -2572,6 +2658,12 @@ void system_start_services(system_config_t *cfg, system_notification_cb_t notifi
 	g_runtime = &runtime;
 
 	check_and_mount_existing_sd(cfg->storage_cfg, &runtime); // mount sd on startup, if it's present
+
+	// No card at startup: the first one inserted is attached like any other
+	// (card_databases_attach), rather than taken for one already in.
+	if (cfg->storage_cfg->manage_mount && !is_mounted(sd_root)) {
+		card_attached = false;
+	}
 
 	pthread_t supervisor;
 	if (pthread_create(&supervisor, NULL, card_supervisor_thread, NULL) == 0) {

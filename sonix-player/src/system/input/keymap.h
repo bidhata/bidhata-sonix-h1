@@ -45,8 +45,21 @@ typedef enum {
 	KEYMAP_ACTION_NEXT,
 	KEYMAP_ACTION_VOLUME_UP,
 	KEYMAP_ACTION_VOLUME_DOWN,
+	// A step inside what is playing rather than out of it: the sentence a
+	// passing lorry covered, the advert not worth hearing. Appended, and the
+	// config stores names, so a saved choice never changes meaning.
+	KEYMAP_ACTION_JUMP_BACK,
+	KEYMAP_ACTION_JUMP_FORWARD,
 	KEYMAP_ACTION_COUNT,
 } keymap_action_t;
+
+// How far the two jumps go, in seconds: back far enough to catch a sentence
+// again, forward far enough to step over half a minute of sponsor. On an
+// audiobook the jumps follow the book's own two settings instead (Settings ->
+// Audiobooks -> Change controls), so that a key and the button on screen never
+// disagree; see jump_by() in system.c.
+#define KEYMAP_JUMP_BACK_SECONDS 10.0
+#define KEYMAP_JUMP_FORWARD_SECONDS 30.0
 
 // Reads the configuration. Call once at startup, before the key threads start.
 void keymap_init(void);
@@ -58,8 +71,8 @@ keymap_action_t keymap_get(keymap_button_t button);
 void keymap_set(keymap_button_t button, keymap_action_t action);
 
 // The double click: one button whose second press, coming quickly after the
-// first, does another action -- and held, holds that action (a seek for next
-// or previous, a repeat for the volume). KEYMAP_BTN_COUNT or
+// first, does another action -- and held, holds that action (a seek for next,
+// previous and the two jumps, a repeat for the volume). KEYMAP_BTN_COUNT or
 // KEYMAP_ACTION_NONE switch it off. The button's own action then waits for
 // the double-click window to close before it runs.
 keymap_button_t keymap_double_button(void);

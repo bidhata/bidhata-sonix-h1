@@ -78,7 +78,11 @@ static void job_destroy(covers_job_t *job) {
 static int next_index(covers_job_t *job) {
 	pthread_mutex_lock(&job->lock);
 	for (;;) {
-		if (job->stopping || job->gen != covers_gen) {
+		// `stopping` alone, which the UI thread sets while it holds this lock:
+		// it is the last thing that thread does with the job, so the job can
+		// be destroyed once this returns. The generation moves a moment
+		// before that, while the UI thread is still about to take the lock.
+		if (job->stopping) {
 			pthread_mutex_unlock(&job->lock);
 			return -1;
 		}

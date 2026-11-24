@@ -389,8 +389,10 @@ static void remove_old_files(const char *root) {
 }
 
 static ota_result_t do_download(void) {
+	// The root names the mount point even with no card on it, or with the card
+	// handed to a computer: the file would then fill the internal flash.
 	const char *root = storage_sd_root();
-	if (!root || !*root) {
+	if (!root || !*root || !storage_card_usable()) {
 		return OTA_NO_CARD;
 	}
 

@@ -309,12 +309,14 @@ static void *reader_thread(void *arg) {
 			// which is what makes a finger sliding from one button to another
 			// without lifting behave correctly.
 			uint16_t mask = 0;
+			int contacts = 0; // fingers in this packet, on a button or not
 
 			if (protocol_b) {
 				for (int s = 0; s < GBINPUT_MAX_CONTACTS; s++) {
 					if (!slots[s].used) {
 						continue;
 					}
+					contacts++;
 					int sx, sy;
 					to_screen(slots[s].x, slots[s].y, &sx, &sy);
 					mask |= keys_at(sx, sy);
@@ -324,6 +326,7 @@ static void *reader_thread(void *arg) {
 				// reached by both driver conventions: an empty SYN_MT_REPORT
 				// followed by SYN_REPORT, or a bare SYN_REPORT. The gt9xx sends
 				// the latter.
+				contacts = pending_count;
 				if (hold_missing) {
 					mask = held_mask(held, pending, pending_count);
 				} else {
@@ -344,7 +347,15 @@ static void *reader_thread(void *arg) {
 			// whatever the contacts say.
 			if (saw_btn_touch && !btn_touch_down) {
 				mask = 0;
+				contacts = 0;
 				memset(held, 0, sizeof(held));
+			}
+
+			// LVGL's indev is parked, so the idle clock that blanks the screen
+			// sees none of these touches unless it is told. Only with the panel
+			// lit, as for LVGL's own: a touch on a dark screen is not use.
+			if ((contacts > 0 || mask != 0) && power_screen_is_on()) {
+				power_notify_activity();
 			}
 
 			// Menu fires on the rising edge: a finger resting there counts once,

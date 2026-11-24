@@ -520,8 +520,8 @@ static void crash_handler(int sig, siginfo_t *info, void *context) {
 	// The charger back on. The player is about to sit here doing nothing, and
 	// if it went down holding the charge limit the battery would never fill
 	// again -- the charger driver keeps that bit until the next boot. One write
-	// to one sysfs node, which is safe enough to do from here.
-	power_charging_release();
+	// to one sysfs node, with open, write and close and nothing else.
+	power_charging_release_from_signal();
 
 	for (;;) {
 		pause();
@@ -1288,6 +1288,10 @@ void display_set_rotated(bool rotated) { host_rotated = rotated; }
 void panel_touch_enable(bool enabled) { (void)enabled; }
 const char *panel_touch_device(void) { return NULL; }
 
+// No framebuffer pages on the simulator: the video player draws through LVGL.
+uint16_t *display_direct_page(void) { return NULL; }
+void display_direct_flip(void) {}
+
 // There is no framebuffer to read on the simulator, but the SDL renderer can
 // be read back. The rest of the path is identical (same copy, same flash, same
 // PNG writer); only the source of the pixels differs.
@@ -1595,6 +1599,26 @@ uint16_t *display_capture_frame(int *out_w, int *out_h) {
 		*out_h = (int)fb_var.yres;
 	}
 	return copy;
+}
+
+// The page that is not on screen, for the video player to draw into, and the
+// swap that shows it (see power.h). fb_var.yoffset is what says which page is
+// which, exactly as for the capture above and for the flush.
+uint16_t *display_direct_page(void) {
+	if (!fb_display || !fb_mem || fb_rotated) {
+		return NULL;
+	}
+	return (uint16_t *)(fb_mem + (fb_var.yoffset ? 0 : fb_page_size));
+}
+
+void display_direct_flip(void) {
+	if (!fb_display || !fb_mem || fb_rotated) {
+		return;
+	}
+	fb_var.yoffset = fb_var.yoffset ? 0 : fb_var.yres;
+	if (ioctl(fb_fd, FBIOPAN_DISPLAY, &fb_var) < 0) {
+		perror("fb: FBIOPAN_DISPLAY (direct)");
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2092,9 +2116,15 @@ int main(int argc, char **argv) {
 
 	system_start_services(&system_cfg, post_gui_popup, NULL);
 
+	// Whether there is a card behind the root right now. With none, the mount
+	// point is a folder on the internal flash, and nothing below opens a log, a
+	// database or a cache in it: they are opened when a card is inserted (see
+	// card_databases_attach in system.c).
+	bool card_usable = storage_card_usable();
+
 #ifndef HOST_BUILD
-	logging_attach_sd(storage_sd_root());
-	btlog_card_attach(storage_sd_root());
+	logging_attach_sd(card_usable ? storage_sd_root() : NULL);
+	btlog_card_attach(card_usable ? storage_sd_root() : NULL);
 	// Now that the log is on the card: whatever the kernel said about the
 	// previous run, which is the only place a SIGKILL leaves a trace.
 	logging_report_previous_run();
@@ -2142,7 +2172,7 @@ int main(int argc, char **argv) {
 	// Artwork thumbnails are kept on the card, next to the music, so that
 	// browsing a library only ever decodes each cover once -- the same trick
 	// the stock player uses with its own .hiby/.../cache folder.
-	cover_set_cache_dir(gui_cfg.sd_root_path);
+	cover_set_cache_dir(card_usable ? gui_cfg.sd_root_path : NULL);
 
 	// The shapes of tracks, for the player's alternative layout. The worker
 	// sleeps until a page asks for one, so starting it costs a thread and
@@ -2183,7 +2213,9 @@ int main(int argc, char **argv) {
 
 		char db_path[600];
 		snprintf(db_path, sizeof(db_path), "%s/.local/library.db", db_root);
-		library_open(db_path);
+		if (card_usable) {
+			library_open(db_path);
+		}
 		// The same file the app downloads: one index, served as it is.
 		sonixlink_set_db_path(db_path);
 
@@ -2195,10 +2227,12 @@ int main(int argc, char **argv) {
 
 		// The audiobook index lives beside it, in its own file.
 		snprintf(db_path, sizeof(db_path), "%s/.local/audiobooks.db", db_root);
-		audiobookdb_open(db_path);
+		if (card_usable) {
+			audiobookdb_open(db_path);
 
-		// And the radio's own: the starred stations and the last few played.
-		radio_store_open(db_root);
+			// And the radio's own: the starred stations and the last few played.
+			radio_store_open(db_root);
+		}
 	}
 
 	// TLS, so an https:// station can be opened at all. Warmed up here rather
@@ -2375,14 +2409,13 @@ int main(int argc, char **argv) {
 #endif
 		.brightness = -1, // adopt the panel's current level as the on-brightness
 		.screen_off_enabled = false,
-		// Off unless asked for in Settings. Blanking this panel powers the
-		// touch controller down with it, so the screen cannot be woken by
-		// touching it -- only by the power key. A timer that traps the user
-		// like that is not something to have on by default.
+		// Replaced just below by what Settings holds. Blanking this panel
+		// powers the touch controller down with it, so on a player without
+		// tap-to-wake the screen is woken by the power key only.
 		.screen_off_timeout_ms = 60000,
 	};
 	// Whatever was chosen in Settings last time.
-	power_cfg.screen_off_timeout_ms = (uint32_t)config_get_int("power", "screen_off_seconds", 0) * 1000;
+	power_cfg.screen_off_timeout_ms = (uint32_t)config_get_int("power", "screen_off_seconds", SETTINGS_SCREEN_OFF_DEFAULT_SECONDS) * 1000;
 	power_cfg.screen_off_enabled = (power_cfg.screen_off_timeout_ms > 0);
 	// The brightness picked in Settings > Screen; -1 (not set yet) keeps
 	// the adopt-the-panel's-level behaviour above.

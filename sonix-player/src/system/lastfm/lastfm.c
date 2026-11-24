@@ -24,6 +24,13 @@
 #define API_TIMEOUT_SECS 15
 #define BODY_LIMIT (64 * 1024)
 
+// The page a phone opens to allow the application, with api_key and token.
+#define WEB_AUTH_URL "https://www.last.fm/api/auth/"
+// How often auth.getSession is asked while the user is on that page, and for
+// how long before the attempt is given up. Last.fm keeps a token for an hour.
+#define WEB_POLL_SECS 3
+#define WEB_LOGIN_SECS 600
+
 // track.scrobble takes at most 50 plays per request.
 #define BATCH_MAX 50
 #define QUEUE_MAX 5000
@@ -84,6 +91,15 @@ static char login_user[128];
 static char login_password[256];
 static unsigned login_serial;
 static lastfm_login_result_t login_result;
+
+// Signing in on a phone. `web_wanted` from lastfm_web_login_start() until the
+// attempt ends one way or another; `web_gen` moves at every start and every
+// cancel, so the worker can tell an answer that belongs to an attempt that is
+// no longer the one in hand. `web_url` is the page to open, once Last.fm has
+// given a token to put in it.
+static bool web_wanted;
+static unsigned web_gen;
+static char web_url[LASTFM_WEB_URL_MAX];
 
 // Plays that have qualified and are not in the queue file yet: the file waits
 // for a card that can be written, and a play waits for a clock that is set.
@@ -678,6 +694,33 @@ static result_t call(param_t *params, int count, char *why, size_t why_size, int
 // the worker
 // ---------------------------------------------------------------------------
 
+// The end of a sign-in attempt, by either road: the session is kept when there
+// is one, and the interface is told how it went.
+static void login_finish(lastfm_login_result_t outcome, const char *key, const char *name_out, const char *why) {
+	if (outcome == LASTFM_LOGIN_OK) {
+		save_session(key, name_out);
+		printf("lastfm: signed in as %s\n", name_out);
+	} else {
+		fprintf(stderr, "lastfm: sign-in failed: %s\n", why);
+	}
+
+	pthread_mutex_lock(&lock);
+	logging_in = false;
+	login_result = outcome;
+	login_serial++;
+	if (outcome == LASTFM_LOGIN_OK) {
+		snprintf(session_key, sizeof(session_key), "%s", key);
+		snprintf(user, sizeof(user), "%s", name_out);
+		session_expired = false;
+		session_refusals = 0;
+		refused = false;
+		detail[0] = '\0';
+	} else {
+		snprintf(detail, sizeof(detail), "%s", why);
+	}
+	pthread_mutex_unlock(&lock);
+}
+
 static void do_login(const char *name, char *password) {
 	param_t params[5] = {
 		{"method", "auth.getMobileSession"},
@@ -708,30 +751,120 @@ static void do_login(const char *name, char *password) {
 	} else {
 		outcome = LASTFM_LOGIN_REFUSED;
 	}
+	login_finish(outcome, key, name_out, why);
+	wipe(key, sizeof(key));
+}
 
-	if (outcome == LASTFM_LOGIN_OK) {
-		save_session(key, name_out);
-		printf("lastfm: signed in as %s\n", name_out);
-	} else {
-		fprintf(stderr, "lastfm: sign-in failed: %s\n", why);
-	}
+// ---------------------------------------------------------------------------
+// signing in on a phone
+//
+// auth.getToken gives a token, the user opens last.fm/api/auth with it on a
+// phone and allows the application, and auth.getSession then trades the token
+// for the session key. Until the user has done so auth.getSession answers
+// error 14, which is the cue to ask again a little later.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+	unsigned gen; // the attempt this token belongs to
+	bool have_token;
+	char token[64];
+	double deadline;  // boot_seconds() at which the attempt is given up
+	double next_poll; // and at which auth.getSession is asked again
+} web_login_t;
+
+// Ends the attempt `w` belongs to with `outcome`, unless it was cancelled or
+// replaced while the request was on the wire. True when it was still the one.
+static bool web_login_end(web_login_t *w, lastfm_login_result_t outcome, const char *key, const char *name,
+						  const char *why) {
+	w->have_token = false;
+	wipe(w->token, sizeof(w->token));
 
 	pthread_mutex_lock(&lock);
-	logging_in = false;
-	login_result = outcome;
-	login_serial++;
-	if (outcome == LASTFM_LOGIN_OK) {
-		snprintf(session_key, sizeof(session_key), "%s", key);
-		snprintf(user, sizeof(user), "%s", name_out);
-		session_expired = false;
-		session_refusals = 0;
-		refused = false;
-		detail[0] = '\0';
-	} else {
-		snprintf(detail, sizeof(detail), "%s", why);
+	bool mine = web_wanted && web_gen == w->gen;
+	if (mine) {
+		web_wanted = false;
+		web_url[0] = '\0';
 	}
 	pthread_mutex_unlock(&lock);
+	if (mine) {
+		login_finish(outcome, key, name, why);
+	}
+	return mine;
+}
+
+// One step of the attempt in hand: the token first, then one question about
+// the session. True when it ended with a session.
+static bool web_login_step(web_login_t *w) {
+	pthread_mutex_lock(&lock);
+	bool wanted = web_wanted;
+	unsigned gen = web_gen;
+	pthread_mutex_unlock(&lock);
+
+	if (!wanted) {
+		w->have_token = false;
+		return false;
+	}
+	char why[160];
+	int code = 0;
+	char *body = NULL;
+
+	if (!w->have_token || w->gen != gen) {
+		w->gen = gen;
+		w->have_token = false;
+		param_t params[3] = {{"method", "auth.getToken"}};
+		result_t result = call(params, 1, why, sizeof(why), &code, &body);
+		if (result == RESULT_OK && !xml_tag(body, "token", w->token, sizeof(w->token))) {
+			snprintf(why, sizeof(why), "no token in the answer");
+			result = RESULT_REFUSED;
+		}
+		free(body);
+		if (result != RESULT_OK) {
+			web_login_end(w, result == RESULT_RETRY ? LASTFM_LOGIN_NO_REPLY : LASTFM_LOGIN_REFUSED, "", "", why);
+			return false;
+		}
+
+		pthread_mutex_lock(&lock);
+		if (web_wanted && web_gen == w->gen) {
+			snprintf(web_url, sizeof(web_url), WEB_AUTH_URL "?api_key=%s&token=%s", api_key, w->token);
+			w->have_token = true;
+		}
+		pthread_mutex_unlock(&lock);
+		w->deadline = boot_seconds() + WEB_LOGIN_SECS;
+		w->next_poll = boot_seconds() + WEB_POLL_SECS - 0.5;
+		return false;
+	}
+
+	if (boot_seconds() < w->next_poll) {
+		return false;
+	}
+	// A little under the worker's own wait, so that a wake-up that comes a
+	// moment early still asks instead of sleeping the stretch again.
+	w->next_poll = boot_seconds() + WEB_POLL_SECS - 0.5;
+
+	param_t params[4] = {{"method", "auth.getSession"}, {"token", w->token}};
+	result_t result = call(params, 2, why, sizeof(why), &code, &body);
+	char key[64] = "";
+	char name_out[128] = "";
+	if (result == RESULT_OK && (!xml_tag(body, "key", key, sizeof(key)) || !xml_tag(body, "name", name_out, sizeof(name_out)))) {
+		snprintf(why, sizeof(why), "no session in the answer");
+		result = RESULT_REFUSED;
+	}
+	free(body);
+
+	bool signed_in = false;
+	if (result == RESULT_OK) {
+		signed_in = web_login_end(w, LASTFM_LOGIN_OK, key, name_out, "");
+	} else if (boot_seconds() >= w->deadline || code == 15 || code == 4) {
+		// Out of time, or Last.fm no longer knows the token (15: it expired;
+		// 4: it was never valid, or has been used).
+		web_login_end(w, LASTFM_LOGIN_EXPIRED, "", "", why);
+	} else if (result != RESULT_RETRY && code != 14) {
+		// 14 is "not authorised yet", and a request that did not get through
+		// is tried again: anything else is a refusal.
+		web_login_end(w, LASTFM_LOGIN_REFUSED, "", "", why);
+	}
 	wipe(key, sizeof(key));
+	return signed_in;
 }
 
 static void do_logout(void) {
@@ -811,7 +944,10 @@ static void flush_pending(const char *name) {
 	}
 	pthread_mutex_lock(&lock);
 	int ready_count = 0;
-	for (int i = 0; i < pending_count; i++) {
+	// Plays are only ever added at the end, so the ones copied out here are
+	// the dated ones among the first `seen`.
+	int seen = pending_count;
+	for (int i = 0; i < seen; i++) {
 		if (pending[i].when) {
 			ready[ready_count++] = pending[i];
 		}
@@ -841,8 +977,12 @@ static void flush_pending(const char *name) {
 	pthread_mutex_lock(&lock);
 	file_count += kept;
 	int keep = 0;
+	// A sign-out in between empties the list, and leaves nothing of them.
+	if (seen > pending_count) {
+		seen = pending_count;
+	}
 	for (int i = 0; i < pending_count; i++) {
-		if (!pending[i].when) {
+		if (i >= seen || !pending[i].when) {
 			pending[keep++] = pending[i];
 		}
 	}
@@ -1005,6 +1145,7 @@ static void send_queue(sender_t *s, const char *sk) {
 static void *worker_main(void *arg) {
 	(void)arg;
 	sender_t sender = {.batch = BATCH_MAX, .backoff = RETRY_FIRST_SECS};
+	web_login_t web = {0};
 
 	for (;;) {
 		pthread_mutex_lock(&lock);
@@ -1028,6 +1169,11 @@ static void *worker_main(void *arg) {
 			do_login(name, password);
 			wipe(password, sizeof(password));
 			card_ready = false; // checked again against the account now signed in
+			sender.retry_at = 0;
+			sender.backoff = RETRY_FIRST_SECS;
+		}
+		if (web_login_step(&web)) {
+			card_ready = false; // as above
 			sender.retry_at = 0;
 			sender.backoff = RETRY_FIRST_SECS;
 		}
@@ -1099,8 +1245,16 @@ static void *worker_main(void *arg) {
 		counting = counting_locked();
 		bool more_now = active && up && file_count > 0 && boot_seconds() >= sender.retry_at;
 		bool waiting = (counting && (!card_ready || pending_count > 0)) || (active && (file_count > 0 || now_playing_waiting));
-		if (!logout_requested && !login_requested && !more_now) {
-			if (waiting) {
+		// A sign-in on a phone is asked about every few seconds, and a new one
+		// (or one replaced while its token was being fetched) is begun at once.
+		bool web_new = web_wanted && (!web.have_token || web.gen != web_gen);
+		if (!logout_requested && !login_requested && !more_now && !web_new) {
+			if (web_wanted) {
+				struct timespec ts;
+				clock_gettime(CLOCK_MONOTONIC, &ts);
+				ts.tv_sec += WEB_POLL_SECS;
+				pthread_cond_timedwait(&wake, &lock, &ts);
+			} else if (waiting) {
 				struct timespec ts;
 				clock_gettime(CLOCK_MONOTONIC, &ts);
 				ts.tv_sec += WAIT_POLL_SECS;
@@ -1189,11 +1343,49 @@ void lastfm_login(const char *name, const char *password) {
 	pthread_mutex_unlock(&lock);
 }
 
+void lastfm_web_login_start(void) {
+	if (!started) {
+		return;
+	}
+	pthread_mutex_lock(&lock);
+	if (!logging_in) {
+		web_gen++;
+		web_wanted = true;
+		web_url[0] = '\0';
+		logging_in = true;
+		pthread_cond_signal(&wake);
+	}
+	pthread_mutex_unlock(&lock);
+}
+
+void lastfm_web_login_cancel(void) {
+	if (!started) {
+		return;
+	}
+	pthread_mutex_lock(&lock);
+	if (web_wanted) {
+		// The worker drops the token when it next looks; an answer already on
+		// its way is recognised by the generation and thrown away.
+		web_gen++;
+		web_wanted = false;
+		web_url[0] = '\0';
+		logging_in = false;
+		pthread_cond_signal(&wake);
+	}
+	pthread_mutex_unlock(&lock);
+}
+
 void lastfm_logout(void) {
 	if (!started) {
 		return;
 	}
 	pthread_mutex_lock(&lock);
+	if (web_wanted) {
+		web_gen++;
+		web_wanted = false;
+		web_url[0] = '\0';
+		logging_in = false;
+	}
 	logout_requested = true;
 	session_key[0] = '\0';
 	session_expired = false;
@@ -1210,6 +1402,7 @@ void lastfm_get_status(lastfm_status_t *out) {
 	out->queued = file_count + pending_count;
 	out->login_serial = login_serial;
 	out->login_result = login_result;
+	snprintf(out->web_url, sizeof(out->web_url), "%s", web_url);
 	if (!started) {
 		out->state = LASTFM_STATE_UNAVAILABLE;
 	} else if (logging_in) {
@@ -1230,7 +1423,9 @@ void lastfm_get_status(lastfm_status_t *out) {
 
 bool lastfm_network_wanted(void) {
 	pthread_mutex_lock(&lock);
-	bool wanted = requests_in_flight > 0;
+	// A sign-in on a phone asks every few seconds until it is allowed there:
+	// the radio stays up between one question and the next.
+	bool wanted = requests_in_flight > 0 || web_wanted;
 	pthread_mutex_unlock(&lock);
 	return wanted;
 }

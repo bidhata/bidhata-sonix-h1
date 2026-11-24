@@ -270,7 +270,14 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 	unsigned in_bits = info.bits ? info.bits : FALLBACK_BITS;
 	publish_format(name, &info);
 
-	snd_pcm_t *pcm = open_capture(mac, rate, channels, in_bits);
+	// The width the frames are read at, which is not always the width the codec
+	// carries. open_capture() asks for one of two formats, 16 or 32 bits, and
+	// the plug around bluealsa converts: a 24-bit stream (aptX HD) is read as
+	// 32-bit words, anything narrower as 16. Everything below that handles the
+	// frames -- the buffer, the output, the widening -- goes by this number.
+	unsigned pcm_bits = in_bits >= 24 ? 32 : 16;
+
+	snd_pcm_t *pcm = open_capture(mac, rate, channels, pcm_bits);
 	if (!pcm) {
 		return SESSION_NO_PCM;
 	}
@@ -282,21 +289,21 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 	bool widen = false;
 	bool opened = false;
 	int buffer_ms = output_ms();
-	if (in_bits == 16) {
+	if (pcm_bits == 16) {
 		opened = audio_external_begin_latency((int)rate, (int)channels, 32, buffer_ms);
 		widen = opened;
 	}
 	if (!opened) {
-		opened = audio_external_begin_latency((int)rate, (int)channels, (int)in_bits, buffer_ms);
+		opened = audio_external_begin_latency((int)rate, (int)channels, (int)pcm_bits, buffer_ms);
 	}
 	if (!opened) {
-		fprintf(stderr, "btreceiver: the output would not take %u Hz %u bit\n", rate, in_bits);
+		fprintf(stderr, "btreceiver: the output would not take %u Hz %u bit\n", rate, pcm_bits);
 		set_error(tr("btreceiver_output_refused"));
 		snd_pcm_close(pcm);
 		return SESSION_OVER;
 	}
 
-	size_t in_frame = (size_t)channels * (in_bits / 8);
+	size_t in_frame = (size_t)channels * (pcm_bits / 8);
 	void *chunk = malloc(CHUNK_FRAMES * in_frame);
 	int32_t *wide = widen ? malloc(CHUNK_FRAMES * (size_t)channels * sizeof(int32_t)) : NULL;
 	if (!chunk || (widen && !wide)) {

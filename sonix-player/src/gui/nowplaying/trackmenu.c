@@ -1477,6 +1477,16 @@ static void details_fill(const char *file, const song_metadata_t *tags, int bits
 		snprintf(buffer, sizeof(buffer), "%d", tags->disc_number);
 		details_add_row("trackmenu_disc_number", buffer);
 	}
+	// The length, when it is known: a stream still arriving has none yet.
+	if (duration_secs >= 0.5) {
+		long secs = (long)(duration_secs + 0.5);
+		if (secs >= 3600) {
+			snprintf(buffer, sizeof(buffer), "%ld:%02ld:%02ld", secs / 3600, (secs / 60) % 60, secs % 60);
+		} else {
+			snprintf(buffer, sizeof(buffer), "%ld:%02ld", secs / 60, secs % 60);
+		}
+		details_add_row("trackmenu_duration", buffer);
+	}
 
 	// A lossy file is described by its bitrate, not by bits and kHz: those two
 	// numbers belong to the PCM leaving the decoder and are identical for a

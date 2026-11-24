@@ -734,6 +734,11 @@ static void slot_bind(int i) {
 		if (album->has_path) {
 			coverloader_request(slot_id(i), album->path, CF_MID_W);
 			slot->requested = true;
+			// The collector stops itself when nothing is outstanding, and this
+			// can be the middle of a drag: it is set going again here.
+			if (poll_timer) {
+				lv_timer_resume(poll_timer);
+			}
 		} else {
 			slot->settled = true;
 		}
@@ -1622,6 +1627,7 @@ static void column_drag_cb(lv_event_t *e) {
 	static int32_t velocity; // 16.16 pixels per millisecond
 	static bool tracking;
 	static bool engaged;
+	static bool stopped_throw; // this press caught the column still moving
 
 	lv_indev_t *indev = lv_indev_active();
 	if (!indev) {
@@ -1631,7 +1637,7 @@ static void column_drag_cb(lv_event_t *e) {
 
 	if (code == LV_EVENT_PRESSED) {
 		lv_indev_get_point(indev, &start);
-		lv_anim_delete(NULL, scroll_anim_cb); // a finger on the column stops a throw
+		stopped_throw = lv_anim_delete(NULL, scroll_anim_cb); // a finger on the column stops a throw
 		start_scroll = scroll;
 		last_y = start.y;
 		last_tick = lv_tick_get();
@@ -1681,7 +1687,31 @@ static void column_drag_cb(lv_event_t *e) {
 	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
 		tracking = false;
 		if (!engaged) {
-			// It never moved: a tap. On the middle record that turns it round.
+			// It never moved: a tap. One that caught a throw only stops it: the
+			// column, left between two records, goes to the nearer one, and the
+			// stop that was cut short is made (scroll_idle()).
+			if (stopped_throw) {
+				stopped_throw = false;
+				int32_t nearest = ((scroll + CF_ONE / 2) >> 16) << 16;
+				if (nearest > scroll_max) {
+					nearest = scroll_max;
+				}
+				if (nearest == scroll) {
+					scroll_idle();
+					return;
+				}
+				lv_anim_t a;
+				lv_anim_init(&a);
+				lv_anim_set_var(&a, &scroll);
+				lv_anim_set_exec_cb(&a, scroll_anim_cb);
+				lv_anim_set_values(&a, scroll, nearest);
+				lv_anim_set_duration(&a, CF_SETTLE_MS);
+				lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+				lv_anim_set_completed_cb(&a, scroll_anim_done_cb);
+				lv_anim_start(&a);
+				return;
+			}
+			// On the middle record that turns it round.
 			if (code == LV_EVENT_RELEASED && !player_sheet_drag_active() && !switcher_back_drag_active()) {
 				lv_area_t middle;
 				lv_obj_get_coords(slots[CF_BEFORE].image, &middle);

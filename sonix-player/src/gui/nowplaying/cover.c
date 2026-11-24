@@ -236,13 +236,15 @@ static bool decode_raw(const uint8_t *data, size_t size, int max_box, raw_image_
 	if (w <= 0 || h <= 0)
 		return false;
 	int bpp = PNG_DECODE_BYTES_PER_PIXEL;
-	size_t needed = (size_t)w * (size_t)h * (size_t)bpp;
+	// In 64 bits: on the device size_t is 32, and a product that wrapped would
+	// pass under the budget.
+	uint64_t needed = (uint64_t)w * (uint64_t)h * (uint64_t)bpp;
 	size_t budget = decode_budget_bytes();
 	if (needed > budget) {
 		// Better no artwork than an allocation that wedges the whole player
 		// halfway down a folder.
-		fprintf(stderr, "cover: skipping %dx%d artwork, decoding it would need about %zu KB (budget %zu KB)\n", w, h,
-				needed / 1024, budget / 1024);
+		fprintf(stderr, "cover: skipping %dx%d artwork, decoding it would need about %llu KB (budget %zu KB)\n", w, h,
+				(unsigned long long)(needed / 1024), budget / 1024);
 		return false;
 	}
 
@@ -2064,10 +2066,12 @@ static bool thumb_key(char *out, size_t out_size, const char *path, int box, boo
 // write, which counts as a miss: the picture is decoded again and the row
 // overwritten.
 static bool image_from_column(sqlite3_stmt *stmt, int col, int w, int h, cover_image_t *out) {
-	if (w <= 0 || h <= 0 || w > 0xFFFF || h > 0xFFFF) {
+	// Nothing kept in these tables is anywhere near this size, and within it
+	// the byte count below cannot wrap a 32-bit size_t.
+	if (w <= 0 || h <= 0 || w > 4096 || h > 4096) {
 		return false;
 	}
-	size_t bytes = (size_t)w * h * 2;
+	size_t bytes = (size_t)((uint64_t)w * (uint64_t)h * 2);
 	const void *blob = sqlite3_column_blob(stmt, col);
 	if (!blob || (size_t)sqlite3_column_bytes(stmt, col) != bytes) {
 		return false;

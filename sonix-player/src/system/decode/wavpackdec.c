@@ -11,6 +11,10 @@ struct wavpackdec {
 	int channels;
 	int sample_rate;
 	int bits;
+	// How wide the unpacked integers are: the file's bytes per sample, in bits.
+	// It is `bits` rounded up to a whole byte -- a 20-bit file unpacks to 24-bit
+	// values with the four low bits clear -- and it is what the shifts go by.
+	int unpacked_bits;
 	bool is_float;
 	uint64_t frames;
 
@@ -74,6 +78,8 @@ wavpackdec_t *wavpackdec_open(const char *filepath) {
 	// A floating-point file has no integer depth; 24 bit is what it is
 	// converted to and what gets reported.
 	w->bits = w->is_float ? 24 : bits;
+	int bytes = WavpackGetBytesPerSample(wpc);
+	w->unpacked_bits = (bytes >= 1 && bytes <= 4 && bytes * 8 >= w->bits) ? bytes * 8 : w->bits;
 
 	int64_t total = WavpackGetNumSamples64(wpc);
 	w->frames = total > 0 ? (uint64_t)total : 0;
@@ -166,7 +172,7 @@ uint64_t wavpackdec_read_s32(wavpackdec_t *w, uint64_t frames, int32_t *out) {
 	if (got == 0) {
 		return 0;
 	}
-	widen_in_place(out, (uint64_t)got * (uint64_t)w->channels, w->bits, w->is_float);
+	widen_in_place(out, (uint64_t)got * (uint64_t)w->channels, w->unpacked_bits, w->is_float);
 	return got;
 }
 
@@ -188,13 +194,13 @@ uint64_t wavpackdec_read_s16(wavpackdec_t *w, uint64_t frames, short *out) {
 		for (uint64_t i = 0; i < count; i++) {
 			out[i] = (short)(float_word_to_q24(w->scratch[i]) >> 8);
 		}
-	} else if (w->bits >= 16) {
-		int shift = w->bits - 16;
+	} else if (w->unpacked_bits >= 16) {
+		int shift = w->unpacked_bits - 16;
 		for (uint64_t i = 0; i < count; i++) {
 			out[i] = (short)(w->scratch[i] >> shift);
 		}
 	} else {
-		int shift = 16 - w->bits;
+		int shift = 16 - w->unpacked_bits;
 		for (uint64_t i = 0; i < count; i++) {
 			out[i] = (short)(w->scratch[i] << shift);
 		}

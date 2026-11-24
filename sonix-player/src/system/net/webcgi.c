@@ -156,7 +156,8 @@ int webcgi_main(void) {
 	// Same rule as the programs this stands in for: below /data/mnt, and no
 	// climbing out of it. This runs as root (thttpd's user= says so), so without
 	// the check the transfer page could ask for a listing of /etc.
-	if (strncmp(path, CGI_ROOT, strlen(CGI_ROOT)) != 0 || strstr(path, "/../") != NULL) {
+	if (strncmp(path, CGI_ROOT, strlen(CGI_ROOT)) != 0 || strstr(path, "/../") != NULL ||
+		(strlen(path) >= 3 && strcmp(path + strlen(path) - 3, "/..") == 0)) {
 		fail("path not allowed");
 		return 1;
 	}

@@ -118,7 +118,9 @@ void replaygain_process(short *frames, int frame_count, int channels) {
 		// The product can exceed 16 bits when the gain is above unity. The peak
 		// check above makes that rare, not impossible: a tag can lie about its
 		// own peak.
-		int v = (frames[i] * g) >> 15;
+		// Sixty-four bits for the product itself: at +12 dB the gain is 2^17,
+		// and a sample of half scale times that no longer fits in an int.
+		int64_t v = ((int64_t)frames[i] * g) >> 15;
 		if (v > 32767) {
 			v = 32767;
 		} else if (v < -32768) {

@@ -120,4 +120,12 @@ void gui_notify_power_menu(void);
 // which lv_obj_is_valid() maps to, follows obj's parent links and is not.
 bool gui_obj_alive(const lv_obj_t *obj);
 
+// LVGL's refresh period, for a page that shows moving pictures: the usual
+// 33 ms is two frames of a game and beats against a film. set() remembers the
+// period it found the first time and restore() puts that one back, so a page
+// calls the first on the way in and the second on the way out. Only one page
+// at a time.
+void gui_refresh_period_set(uint32_t ms);
+void gui_refresh_period_restore(void);
+
 #endif /* GUI_H */

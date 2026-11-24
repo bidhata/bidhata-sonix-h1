@@ -1156,6 +1156,15 @@ bool tidalcache_start(long track_id, const tidal_stream_t *stream, int duration_
 	// streamturn_abandon_all().
 	streamturn_acquire();
 
+	// Asked again now that the turn is here: another caller may have downloaded
+	// this very track during the wait, and opening the file for writing would
+	// truncate it under whoever is playing it.
+	if (have_file(path, out, size)) {
+		streamturn_release();
+		free(d);
+		return true;
+	}
+
 	// The generation is taken AFTER the wait: a value read before it would be
 	// stale by the time the turn arrives, and a track change that happened
 	// during the wait would cancel this download the moment it starts.

@@ -192,6 +192,28 @@ hbc3000_firmware() {
 	' "$1" "$2"
 }
 
+# The release a kernel image on stdin calls itself ("4.4.94-sonix"), from the
+# "Linux version" line inside its gzip payload. Prints nothing when it cannot
+# be read: no perl, no gzip payload, or a payload gzip does not open.
+kernel_release() {
+	command -v perl >/dev/null 2>&1 || return 0
+	{ perl -e '
+		local $/;
+		binmode STDIN;
+		my $d = <STDIN>;
+		my $i = index($d, "\x1f\x8b\x08");
+		exit 1 if $i < 0;
+		binmode STDOUT;
+		print substr($d, $i);
+	' | gzip -dc 2>/dev/null | LC_ALL=C grep -a -o 'Linux version [^ ]*' | head -1 | awk '{print $3}'; } || true
+}
+
+# The release a kernel module was built for: the first word of its vermagic.
+# A kernel loads a module only when the two are the same string.
+module_release() {
+	{ LC_ALL=C grep -a -o 'vermagic=[^ ]*' "$1" | head -1 | cut -d= -f2; } || true
+}
+
 # Writes an image into the OTA folder the way the updater reads it: 512 KiB
 # chunks named NAME.NNNN.<md5 of the previous chunk>, the first one named after
 # the md5 of the whole image, and ota_md5_NAME.<md5 of the whole image> listing
@@ -483,6 +505,32 @@ build_one() {
 		done
 	fi
 
+	# Every script the module list runs has to be in the image, and every
+	# module those scripts load with it. The list is this model's; the scripts
+	# and modules the assets do not carry are the stock firmware's, and a stock
+	# firmware of the other model does not have them: the device would boot
+	# without its panel.
+	[ -f "$DRIVER_LIST" ] || die "the rootfs has no module_driver/driver_default_init_script.sh."
+	DRIVER_GAPS=""
+	for script in $(tr -d '\r' < "$DRIVER_LIST" | awk '$1 == "sh" { print $2 }'); do
+		if [ ! -f "$SQUASH_DIR/module_driver/$script" ]; then
+			DRIVER_GAPS="$DRIVER_GAPS
+    module_driver/$script (run by driver_default_init_script.sh)"
+			continue
+		fi
+		for ko in $(tr -s ' \t\r\\' '\n\n\n\n' < "$SQUASH_DIR/module_driver/$script" | awk 'prev == "insmod" { print } { prev = $0 }'); do
+			case "$ko" in
+			*'$'*) continue ;; # a path only the device can resolve
+			/*) ko_path="$SQUASH_DIR$ko" ;;
+			*)  ko_path="$SQUASH_DIR/module_driver/$ko" ;;
+			esac
+			[ -f "$ko_path" ] || DRIVER_GAPS="$DRIVER_GAPS
+    ${ko_path#"$SQUASH_DIR"/} (loaded by module_driver/$script)"
+		done
+	done
+	[ -z "$DRIVER_GAPS" ] || die "the $MODEL_NAME module list needs files this rootfs does not have:$DRIVER_GAPS
+  Is $(basename "$SOURCE_UPT") the stock firmware of the $MODEL_NAME?"
+
 	# What the other model's tree carries and this one does not. Nothing is
 	# copied across and nothing fails: whatever the stock firmware had at that
 	# path is left alone, which for a boot logo is this model's own at its own
@@ -590,6 +638,27 @@ build_one() {
 		say ""
 	fi
 
+	# Stock programs nothing in this image starts. strace is a debugging tool
+	# no script calls. bsa_server is Broadcom's Bluetooth stack, started only
+	# by bt_enable_bsa.sh, which only the stock player ran: the pair goes when
+	# no other file in the image names either of them, and stays otherwise.
+	step "[$MODEL_NAME] removing stock programs nothing uses"
+	if [ -f "$SQUASH_DIR/usr/bin/strace" ]; then
+		rm -f "$SQUASH_DIR/usr/bin/strace"
+		say "    usr/bin/strace removed"
+	fi
+	if [ -f "$SQUASH_DIR/usr/bin/bsa_server" ]; then
+		BSA_USERS="$(grep -rlE 'bsa_server|bt_enable_bsa' "$SQUASH_DIR" 2>/dev/null |
+			grep -vE '/usr/bin/(bsa_server|bt_enable_bsa\.sh)$' || true)"
+		if [ -z "$BSA_USERS" ]; then
+			rm -f "$SQUASH_DIR/usr/bin/bsa_server" "$SQUASH_DIR/usr/bin/bt_enable_bsa.sh"
+			say "    usr/bin/bsa_server and bt_enable_bsa.sh removed"
+		else
+			say "    usr/bin/bsa_server kept: something still names it"
+		fi
+	fi
+	say ""
+
 	# ==========================================================================
 	# 6. The stock interface's resources
 	# ==========================================================================
@@ -620,7 +689,7 @@ build_one() {
 	# accept, the converter and the serial it prints -- hangs off this one string,
 	# and an image carrying the other model's name would offer that model's update
 	# to a device that cannot survive it.
-	FOUND_NAME="$(tr -d '\r' < "$JSON" | tr ',' '\n' | grep -i '"device-name"' | head -1 | sed -E 's/.*"device-name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"
+	FOUND_NAME="$(tr -d '\r' < "$JSON" | tr ',' '\n' | grep -i '"device-name"' | head -1 | sed -E 's/.*"device-name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' || true)"
 	[ -n "$FOUND_NAME" ] || die "$SYSTEM_INFO has no device-name."
 	[ "$FOUND_NAME" = "$MODEL_NAME" ] || die "$SYSTEM_INFO says device-name \"$FOUND_NAME\",
 	  but this is the $MODEL_NAME image. Check assets/$MODEL_DIR/$SYSTEM_INFO."
@@ -658,6 +727,46 @@ build_one() {
 
 	ROOTFS_NEW="$OTA_DIR/rootfs.squashfs"
 	KERNEL_NEW="$KERNEL_DIR/xImage-$MODEL_DIR"
+
+	# The kernel that goes into the image against the modules it will be asked
+	# to load. A kernel refuses a module built for another release, and the
+	# modules in the assets are built for the kernel in kernel/: on the stock
+	# kernel, or on one built under another name, none of them loads and the
+	# device has no panel, no touch and no keys. A stock module the assets do
+	# not replace and this kernel will not load is left out of the image: its
+	# insmod fails the same with the file there or not, and the partition has
+	# no room for files that can do nothing.
+	step "[$MODEL_NAME] checking the modules against the kernel"
+	if [ -f "$KERNEL_NEW" ]; then
+		KERNEL_LABEL="kernel/xImage-$MODEL_DIR"
+		KERNEL_RELEASE="$(kernel_release < "$KERNEL_NEW")"
+	else
+		KERNEL_LABEL="the stock kernel"
+		KERNEL_RELEASE="$(cat "$OTA_DIR"/xImage.[0-9]* 2>/dev/null | kernel_release || true)"
+	fi
+	if [ -z "$KERNEL_RELEASE" ]; then
+		warn "could not read the release of $KERNEL_LABEL (needs perl and gzip):
+  the modules were NOT checked against it."
+	else
+		MODULE_CLASH=""
+		for ko in "$SQUASH_DIR"/module_driver/*.ko; do
+			[ -f "$ko" ] || continue
+			ko_name="$(basename "$ko")"
+			ko_release="$(module_release "$ko")"
+			[ "$ko_release" != "$KERNEL_RELEASE" ] || continue
+			if [ -f "$ASSETS_DIR/$MODEL_DIR/module_driver/$ko_name" ]; then
+				MODULE_CLASH="$MODULE_CLASH
+    module_driver/$ko_name is built for \"$ko_release\""
+			else
+				rm -f "$ko"
+				say "    module_driver/$ko_name removed: from the stock firmware, built for \"$ko_release\", and $KERNEL_LABEL ($KERNEL_RELEASE) will not load it"
+			fi
+		done
+		[ -z "$MODULE_CLASH" ] || die "$KERNEL_LABEL is \"$KERNEL_RELEASE\" and will not load these modules of assets/$MODEL_DIR:$MODULE_CLASH
+  The modules in the assets need the kernel they were built with in kernel/xImage-$MODEL_DIR."
+		say "    $KERNEL_LABEL and the modules: $KERNEL_RELEASE"
+	fi
+	say ""
 
 	step "[$MODEL_NAME] building the filesystem"
 	mksquashfs "$SQUASH_DIR" "$ROOTFS_NEW" -comp lzo -all-root > /dev/null
@@ -720,7 +829,14 @@ build_one() {
 
 	step "[$MODEL_NAME] writing $(basename "$OUTPUT_UPT")"
 	rm -f "$OUTPUT_UPT"
-	"$ISO_TOOL" -o "$OUTPUT_UPT" -J -r "$WORK_DIR" > /dev/null 2>&1
+	# Written under another name and moved into place when it is whole, so a
+	# run that fails here leaves no .upt behind.
+	if ! ISO_LOG="$("$ISO_TOOL" -o "$OUTPUT_UPT.packer.tmp" -J -r "$WORK_DIR" 2>&1 > /dev/null)"; then
+		rm -f "$OUTPUT_UPT.packer.tmp"
+		die "$ISO_TOOL could not write the image:
+$ISO_LOG"
+	fi
+	mv -f "$OUTPUT_UPT.packer.tmp" "$OUTPUT_UPT"
 
 	[ -f "$OUTPUT_UPT" ] || die "the image was not written."
 

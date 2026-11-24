@@ -48,6 +48,8 @@ typedef struct {
 	bool hidden;	 // display:none somewhere at or above this depth
 	bool block;		 // this element closes a block when it ends
 	bool skip;		 // this element and everything in it is not read
+	bool counted_skip;	 // this element is one of those skip_depth counts
+	bool counted_hidden; // this element is one of those hidden_depth counts
 	char name[16];	 // so the matching CLOSE can be recognised
 } tag_state_t;
 
@@ -351,6 +353,8 @@ static void push(parse_t *p, const epub_xml_t *x, uint8_t add_style, bool is_blo
 	top->quote = (uint8_t)((below ? below->quote : 0) + (is_quote ? 1 : 0));
 	top->block = is_block;
 	top->skip = skip;
+	top->counted_skip = false;
+	top->counted_hidden = false;
 	size_t len = x->name_len < sizeof(top->name) - 1 ? x->name_len : sizeof(top->name) - 1;
 	memcpy(top->name, x->name, len);
 	top->name[len] = '\0';
@@ -456,8 +460,38 @@ bool epub_parse_chapter(ebook_t *book, const char *xhtml) {
 			if (p.skip_depth > 0 || p.hidden_depth > 0) {
 				continue;
 			}
-			size_t len = epub_xml_unescape(decoded, sizeof(decoded), x.text, x.text_len);
-			if (!add_run(&p, decoded, len)) {
+			// A run longer than the buffer is unescaped a piece at a time.
+			// Unescaping never makes text longer, so a piece of input that fits
+			// the buffer comes out whole. A piece ends neither inside a
+			// character nor inside an entity, both of which would be read as
+			// something else if cut in two.
+			bool room = true;
+			size_t at = 0;
+			while (room && at < x.text_len) {
+				size_t take = x.text_len - at;
+				if (take > sizeof(decoded) - 1) {
+					take = sizeof(decoded) - 1;
+					while (take > 1 && ((unsigned char)x.text[at + take] & 0xC0u) == 0x80u) {
+						take--;
+					}
+					// The longest entity epub_xml_unescape() looks for is twelve
+					// bytes from its '&' to its ';'.
+					for (size_t back = 1; back <= 12 && back < take; back++) {
+						char c = x.text[at + take - back];
+						if (c == ';') {
+							break;
+						}
+						if (c == '&') {
+							take -= back;
+							break;
+						}
+					}
+				}
+				size_t len = epub_xml_unescape(decoded, sizeof(decoded), x.text + at, take);
+				room = add_run(&p, decoded, len);
+				at += take;
+			}
+			if (!room) {
 				break;
 			}
 			continue;
@@ -487,8 +521,14 @@ bool epub_parse_chapter(ebook_t *book, const char *xhtml) {
 			bool skip = tag_is(&x, "script") || tag_is(&x, "head") || tag_is(&x, "title") || tag_is(&x, "rt") ||
 						tag_is(&x, "rp") || tag_is(&x, "rtc");
 			if (skip && !x.self_closing) {
-				p.skip_depth++;
-				push(&p, &x, 0, false, false, false, true, EBOOK_ALIGN_DEFAULT, false);
+				// Counted only when it is on the stack: the close that takes the
+				// count back is found there, and an element nested too deep to
+				// be tracked would otherwise leave the rest of the chapter unread.
+				if (p.depth < STACK_MAX) {
+					push(&p, &x, 0, false, false, false, true, EBOOK_ALIGN_DEFAULT, false);
+					p.stack[p.depth - 1].counted_skip = true;
+					p.skip_depth++;
+				}
 				continue;
 			}
 			if (p.skip_depth > 0) {
@@ -515,9 +555,10 @@ bool epub_parse_chapter(ebook_t *book, const char *xhtml) {
 			if (hidden || p.hidden_depth > 0) {
 				// Hidden and everything inside it. Counted rather than flagged,
 				// because the close that ends it may be several levels up.
-				if (!x.self_closing) {
-					p.hidden_depth++;
+				if (!x.self_closing && p.depth < STACK_MAX) {
 					push(&p, &x, 0, false, false, false, false, align, true);
+					p.stack[p.depth - 1].counted_hidden = true;
+					p.hidden_depth++;
 				}
 				continue;
 			}
@@ -615,10 +656,10 @@ bool epub_parse_chapter(ebook_t *book, const char *xhtml) {
 			continue; // a close with no open: ignore it
 		}
 		for (int i = p.depth - 1; i >= found; i--) {
-			if (p.stack[i].skip && p.skip_depth > 0) {
+			if (p.stack[i].counted_skip && p.skip_depth > 0) {
 				p.skip_depth--;
 			}
-			if (p.stack[i].hidden && p.hidden_depth > 0) {
+			if (p.stack[i].counted_hidden && p.hidden_depth > 0) {
 				p.hidden_depth--;
 			}
 			if (p.stack[i].block) {

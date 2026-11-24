@@ -37,26 +37,11 @@ lv_obj_t *sysinfo_screen;
 //                                         the internet or from the card
 // ---------------------------------------------------------------------------
 
-#define FIRMWARE_MIN_BATTERY_PERCENT 30
-
 static void firmware_clicked_cb(lv_event_t *e) {
 	(void)e;
 
-	// Charge check first, like the stock player: an update that loses power
-	// halfway leaves the device in recovery with a half-written kernel, the one
-	// failure here that cannot be undone from the UI. An unreadable level must
-	// not block the update: the reader returns "!!" when it cannot find the
-	// gauge (the host build, and any firmware naming that sysfs node
-	// differently), and refusing to update over a battery nobody can measure
-	// would be the opposite of useful.
-	char *percent_text = read_battery_percent();
-	int percent = 100;
-	if (percent_text && percent_text[0] >= '0' && percent_text[0] <= '9') {
-		percent = atoi(percent_text);
-	}
-	bool charging = read_battery_charging();
-
-	if (percent < FIRMWARE_MIN_BATTERY_PERCENT && !charging) {
+	// Charge check first, like the stock player; see fwupdate_battery_ok().
+	if (!fwupdate_battery_ok()) {
 		gui_notify_popup("system_battery_warning");
 		return;
 	}

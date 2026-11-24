@@ -93,6 +93,11 @@ static void pw_back_cb(lv_event_t *e) {
 }
 
 static void join(const char *ssid, const char *psk) {
+	// The network a wrong key is asked for again (poll_cb): this one, whether
+	// or not a passphrase was typed for it.
+	if (ssid != pending_ssid) {
+		snprintf(pending_ssid, sizeof(pending_ssid), "%s", ssid);
+	}
 	wifi_connect(ssid, psk);
 	joining = true;
 	char text[160];

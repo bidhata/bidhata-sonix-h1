@@ -116,7 +116,11 @@ static void *batch_worker(void *arg) {
 		}
 	}
 	pthread_mutex_unlock(&batch_lock);
-	gui_post(batch_done_cb, b);
+	// gui_post refuses when its queue is full, and a result that is dropped
+	// leaves the "adding" notice up for ever. Asked again until there is room.
+	while (!gui_post(batch_done_cb, b)) {
+		usleep(100000);
+	}
 	return NULL;
 }
 
@@ -235,7 +239,9 @@ static void *fav_worker(void *arg) {
 	free(rows);
 	free(titles);
 	free(artists);
-	gui_post(fav_done_cb, b);
+	while (!gui_post(fav_done_cb, b)) {
+		usleep(100000);
+	}
 	return NULL;
 }
 

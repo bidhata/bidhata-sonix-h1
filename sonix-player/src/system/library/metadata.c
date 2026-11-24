@@ -2473,7 +2473,7 @@ static bool read_cue_metadata(const char *filepath, song_metadata_t *out) {
 	copy_bounded(out->album_artist, sizeof(out->album_artist), cue->performer);
 	copy_bounded(out->genre, sizeof(out->genre), cue->genre);
 	out->year = cue->year;
-	out->track_number = t->number;
+	out->track_number = t->written;
 	out->disc_number = cue->disc;
 	out->has_tags = out->title[0] || out->artist[0] || out->album[0] || out->genre[0];
 	free(cue);

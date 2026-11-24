@@ -91,6 +91,7 @@ typedef struct {
 	lv_obj_t *icon;
 	lv_obj_t *title;
 	lv_obj_t *subtitle;
+	lv_obj_t *length; // a track's length, right of the texts
 	lv_obj_t *chevron;
 	int index; // the hit bound, -1 for none
 	char name[256]; // a track's title, an album's value, an artist
@@ -335,6 +336,7 @@ typedef struct {
 	char name[256];
 	char path[512];
 	char artist[256];
+	int length_ms; // how long a track plays; 0 when the index does not say
 } hit_t;
 
 typedef struct {
@@ -342,12 +344,13 @@ typedef struct {
 	int count;
 } window_ctx_t;
 
-static bool window_cb(const char *name, const char *path, const char *artist, void *user) {
+static bool window_cb(const char *name, const char *path, const char *artist, int length_ms, void *user) {
 	window_ctx_t *ctx = user;
 	hit_t *hit = &ctx->hits[ctx->count++];
 	snprintf(hit->name, sizeof(hit->name), "%s", name ? name : "");
 	snprintf(hit->path, sizeof(hit->path), "%s", path ? path : "");
 	snprintf(hit->artist, sizeof(hit->artist), "%s", artist ? artist : "");
+	hit->length_ms = length_ms;
 	return true;
 }
 
@@ -387,6 +390,22 @@ static void row_bind(row_t *row, int index, const hit_t *hit) {
 		lv_obj_set_hidden(row->subtitle, true);
 	}
 	lv_obj_set_hidden(row->chevron, current_cat == CAT_TRACKS);
+
+	// A track's length at the right of its row, M:SS or H:MM:SS, when the
+	// index has it. Hidden otherwise, and so out of the layout.
+	if (current_cat == CAT_TRACKS && hit->length_ms > 0) {
+		long seconds = (long)((hit->length_ms + 500) / 1000);
+		char text[16];
+		if (seconds >= 3600) {
+			snprintf(text, sizeof(text), "%ld:%02ld:%02ld", seconds / 3600, (seconds / 60) % 60, seconds % 60);
+		} else {
+			snprintf(text, sizeof(text), "%ld:%02ld", seconds / 60, seconds % 60);
+		}
+		lv_label_set_text(row->length, text);
+		lv_obj_set_hidden(row->length, false);
+	} else {
+		lv_obj_set_hidden(row->length, true);
+	}
 
 	lv_obj_set_y(row->button, index * SEARCH_PITCH);
 	lv_obj_set_hidden(row->button, false);
@@ -434,7 +453,7 @@ static void window_update(void) {
 	if (wanted) {
 		static hit_t hits[SEARCH_POOL];
 		window_ctx_t ctx = {hits, 0};
-		library_index_window(ix, first, last - first, window_cb, &ctx);
+		library_index_window_timed(ix, first, last - first, window_cb, &ctx);
 		if (ctx.count < last - first) {
 			// The handle is from before a rescan or a card change: the hits
 			// are asked for again, and this list comes back where it was.
@@ -553,6 +572,13 @@ static void row_create(row_t *row) {
 	lv_obj_set_height(row->subtitle, lv_font_get_line_height(&font_ui_18));
 	lv_obj_add_style(row->subtitle, &theme_style_text_dim, 0);
 	lv_obj_set_style_text_font(row->subtitle, &font_ui_18, 0);
+
+	row->length = lv_label_create(button);
+	lv_label_set_text(row->length, "");
+	lv_obj_add_style(row->length, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(row->length, &font_ui_18, 0);
+	lv_obj_set_clickable(row->length, false);
+	lv_obj_set_hidden(row->length, true);
 
 	row->chevron = lv_image_create(button);
 	lv_image_set_src(row->chevron, &icon_chevron_right);

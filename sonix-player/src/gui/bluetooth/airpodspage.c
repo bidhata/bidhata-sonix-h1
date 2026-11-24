@@ -7,6 +7,7 @@
 
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/shell/pagetimer.h"
 #include "src/gui/shell/settingsrow.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
@@ -316,12 +317,6 @@ static void poll_cb(lv_timer_t *timer) {
 static void screen_loaded_cb(lv_event_t *e) {
 	(void)e;
 	refresh(true);
-	lv_timer_resume(poll_timer);
-}
-
-static void screen_unloaded_cb(lv_event_t *e) {
-	(void)e;
-	lv_timer_pause(poll_timer);
 }
 
 // ---------------------------------------------------------------------------
@@ -482,15 +477,14 @@ void airpodspage_init(gui_config_t *cfg) {
 	hold_row = settingsrow_add(container, "airpods_press_and_hold", NULL, open_hold_cb, NULL);
 	lv_obj_set_hidden(hold_row, true);
 
+	// One tick for both pages, the press-and-hold one included: it follows the
+	// same session. Bound to the two screens together, because the screen being
+	// entered is told it is loaded before the one being left is told it is not,
+	// and a pause on the way out of one would stop the tick for the other.
 	poll_timer = lv_timer_create(poll_cb, POLL_MS, NULL);
-	lv_timer_pause(poll_timer);
+	pagetimer_bind(poll_timer, airpodspage_screen, hold_screen);
 
 	lv_obj_add_event_cb(airpodspage_screen, screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
-	lv_obj_add_event_cb(airpodspage_screen, screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
-	// The press-and-hold page follows the same session, so it keeps the same
-	// tick: entering it from here would otherwise leave it drawing whatever the
-	// state was at the moment it was built.
 	lv_obj_add_event_cb(hold_screen, screen_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
-	lv_obj_add_event_cb(hold_screen, screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 	switcher_attach_back_gesture(airpodspage_screen);
 }

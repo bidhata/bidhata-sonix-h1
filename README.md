@@ -100,6 +100,10 @@ sudo pacman -S base-devel git sdl2 freetype2 opusfile wavpack alsa-lib
 
 `opusfile` pulls in `opus` and `libogg` by itself.
 
+The video player is in the simulator only when the FFmpeg development
+packages are installed as well (`libavformat-dev libavcodec-dev libavutil-dev`
+on Debian and Ubuntu); without them the simulator builds and runs without it.
+
 ### Build
 
 ```bash
@@ -201,15 +205,17 @@ source.
 make target -j$(nproc)
 ```
 
-The first run takes a while and does four things by itself:
+The first run takes a while and does five things by itself:
 
 1. builds the Rockbox MIPS toolchain into `rockbox-toolchain/`
 2. downloads and cross-builds FreeType, static, into `freetype-target/`
 3. downloads and cross-builds libogg, libopus, opusfile and libwavpack, static,
    into `audio-target/`
-4. compiles and links `sonix_player`, and builds `sonix_launch` (see below)
+4. downloads and cross-builds FFmpeg, static and cut down to the decoders the
+   video player uses, into `video-target/`
+5. compiles and links `sonix_player`, and builds `sonix_launch` (see below)
 
-Steps 1 to 3 happen once. Later builds go straight to step 4.
+Steps 1 to 4 happen once. Later builds go straight to step 5.
 
 Everything the device does not already carry is linked statically, so the
 result is one file to copy across with nothing to install beside it. The same
@@ -527,6 +533,7 @@ sonix-player/
 │   │   │   ├── shell/               28 files: theme, screen switcher, status bar, control centre,
 │   │   │   │                        keyboard, popups, toasts, settings rows, first start, icons.c
 │   │   │   ├── streaming/           Tidal, Qobuz, podcast and radio pages, OPML import
+│   │   │   ├── video/               the Video list and the playback screen
 │   │   │   └── wireless/            Wi-Fi, file transfer, AirPlay, DLNA, SonixLink
 │   │   │
 │   │   ├── system/                  
@@ -547,7 +554,8 @@ sonix-player/
 │   │   │   ├── net/                 HTTP, TLS, HLS, mDNS, transfer page
 │   │   │   ├── playback/            queue, play history, device state, audiobooks, sleep timers
 │   │   │   ├── remote/              AirPlay, DLNA, SonixLink
-│   │   │   └── streaming/           Tidal, Qobuz, radio and podcast clients, downloads, OPML, caches
+│   │   │   ├── streaming/           Tidal, Qobuz, radio and podcast clients, downloads, OPML, caches
+│   │   │   └── video/               the video engine (FFmpeg) and the resume positions
 │   │   │
 │   │   └── main.c                   entry point: display, input, and the startup order
 │   │

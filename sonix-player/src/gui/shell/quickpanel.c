@@ -760,12 +760,15 @@ static void panel_drag_cb(lv_event_t *e) {
 	}
 	lv_event_code_t code = lv_event_get_code(e);
 
-	if (quickpanel_blocked()) {
-		return;
-	}
-
+	// quickpanel_blocked() is not asked here. It keeps a closed sheet closed,
+	// and that is decided where the pull starts (topbar_drag_cb); a sheet that
+	// is already open when the block begins has to stay draggable, or nothing
+	// could put it away.
 	if (code == LV_EVENT_PRESSED) {
 		lv_indev_get_point(indev, &start);
+		// A hold whose click never came (the tap guard drops the click of a
+		// finger that moved) must not cost the next tap on a circle.
+		long_press_consumed = false;
 		tracking = panel_open;
 		engaged = DRAG_NONE;
 		press_dragged = false;

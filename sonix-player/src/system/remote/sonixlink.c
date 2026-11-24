@@ -1300,6 +1300,8 @@ static void route_command(client_t *c, const char *query) {
 	reply_status(c, "200 OK", "ok");
 }
 
+static bool resolve_on_card(const char *path, char *real);
+
 // The artwork the scan wrote down beside a track, when there is one. Nothing is
 // decoded here: it is a file on the card, sent as it is.
 static void route_cover(client_t *c, const char *query) {
@@ -1309,12 +1311,20 @@ static void route_cover(client_t *c, const char *query) {
 		return;
 	}
 
-	struct stat st;
-	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > 8 * 1024 * 1024) {
+	// Only inside the card, as in route_browse. Without this the route hands
+	// out any file the player can read, the settings and the Wi-Fi keys too.
+	char real[PATH_MAX];
+	if (!resolve_on_card(path, real)) {
 		reply_status(c, "404 Not Found", "no cover");
 		return;
 	}
-	FILE *f = fopen(path, "rb");
+
+	struct stat st;
+	if (stat(real, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > 8 * 1024 * 1024) {
+		reply_status(c, "404 Not Found", "no cover");
+		return;
+	}
+	FILE *f = fopen(real, "rb");
 	if (!f) {
 		reply_status(c, "404 Not Found", "no cover");
 		return;
@@ -2032,10 +2042,42 @@ static void reply_art_bytes(client_t *c, const char *type, const uint8_t *data, 
 	buf_add(&c->out, (const char *)data, len);
 }
 
+// Resolves `path` and says whether it lies inside the card: resolved first, so
+// neither ".." nor a link leads out of it. `real` (PATH_MAX) receives the
+// resolved form. A track of a CUE sheet is named by the sheet plus "?track=N",
+// and it is the sheet that has to be on the card.
+static bool resolve_on_card(const char *path, char *real) {
+	char root[sizeof(card_root)];
+	pthread_mutex_lock(&lock);
+	snprintf(root, sizeof(root), "%s", card_root);
+	pthread_mutex_unlock(&lock);
+
+	char file[SONIXLINK_PATH_MAX];
+	snprintf(file, sizeof(file), "%s", path);
+	char *track = strstr(file, "?track=");
+	if (track) {
+		*track = '\0';
+	}
+
+	char real_root[PATH_MAX];
+	if (!root[0] || !realpath(root, real_root) || !realpath(file, real)) {
+		return false;
+	}
+	size_t root_len = strlen(real_root);
+	return strncmp(real, real_root, root_len) == 0 && real[root_len] == '/';
+}
+
 static void route_art(client_t *c, const char *query) {
 	char path[SONIXLINK_PATH_MAX] = "";
 	if (!query_value(query, "path", path, sizeof(path)) || !path[0]) {
 		reply_status(c, "400 Bad Request", "no path");
+		return;
+	}
+	// The artwork is read out of the file named, so the file has to be one of
+	// the card's.
+	char on_card[PATH_MAX];
+	if (!resolve_on_card(path, on_card)) {
+		reply_status(c, "404 Not Found", "no artwork");
 		return;
 	}
 	char max_text[16] = "";
@@ -2261,9 +2303,9 @@ static void browse_read(const char *path, const char *indexed, browse_list_t *ou
 			char label[220];
 			cue_virtual_path(de->d_name, sheet->tracks[t].number, file, sizeof(file));
 			if (sheet->tracks[t].title[0]) {
-				snprintf(label, sizeof(label), "%d. %s", sheet->tracks[t].number, sheet->tracks[t].title);
+				snprintf(label, sizeof(label), "%d. %s", sheet->tracks[t].written, sheet->tracks[t].title);
 			} else {
-				snprintf(label, sizeof(label), "%d", sheet->tracks[t].number);
+				snprintf(label, sizeof(label), "%d", sheet->tracks[t].written);
 			}
 			browse_add(out, label, file, false);
 		}
@@ -2531,6 +2573,13 @@ static void accept_client(int listener) {
 
 	int one = 1;
 	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+	// One thread serves every client, so no send may wait: what the socket
+	// will not take now goes on a later pass (write_client).
+	int flags = fcntl(fd, F_GETFL, 0);
+	if (flags >= 0) {
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+	}
+	// For a socket the line above could not switch over.
 	struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
 	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
@@ -2647,6 +2696,7 @@ static void write_client(client_t *c) {
 		ssize_t n = send(c->fd, c->out.data + c->sent, c->out.len - c->sent, MSG_NOSIGNAL);
 		if (n > 0) {
 			c->sent += (size_t)n;
+			c->opened_ms = now_ms(); // the client is taking the reply
 			continue;
 		}
 		if (n < 0 && (errno == EINTR)) {
@@ -2686,9 +2736,23 @@ static void write_client(client_t *c) {
 		if (n < 0 && errno == EINTR) {
 			continue;
 		}
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			// The socket is full. The part of this piece it did not take is
+			// handed back to the file, so the next pass reads it again and
+			// carries on from the byte the client has reached.
+			if (fseek(c->file, -(long)(got - at), SEEK_CUR) != 0) {
+				client_close(c);
+				return;
+			}
+			break;
+		}
 		client_close(c);
 		return;
 	}
+	if (at > 0) {
+		c->opened_ms = now_ms(); // the client is taking the reply
+	}
+	got = at;
 	c->file_left -= (long)got;
 	if (c->file_left <= 0) {
 		client_done(c);
@@ -2971,6 +3035,10 @@ static void *sonixlink_worker(void *unused) {
 				close(links[l]);
 				continue;
 			}
+			int flags = fcntl(links[l], F_GETFL, 0);
+			if (flags >= 0) {
+				fcntl(links[l], F_SETFL, flags | O_NONBLOCK);
+			}
 			struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
 			setsockopt(links[l], SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 			slot->fd = links[l];
@@ -3142,8 +3210,12 @@ static void *sonixlink_worker(void *unused) {
 				continue;
 			}
 			uint32_t idle = now_ms() - clients[i].opened_ms;
-			bool busy = clients[i].out.len > clients[i].sent || clients[i].file;
-			if (clients[i].persistent ? (!busy && idle > PERSISTENT_IDLE_MS) : idle > 10000) {
+			// A reply still on its way out is not silence: the index and the
+			// thumbnails take longer than ten seconds to send, and every byte
+			// the client takes starts the count again (write_client). One that
+			// asked and then takes nothing for this long is closed like any
+			// other that went quiet, or it would hold its slot for good.
+			if (idle > (clients[i].persistent ? PERSISTENT_IDLE_MS : 10000)) {
 				client_close(&clients[i]);
 			}
 		}

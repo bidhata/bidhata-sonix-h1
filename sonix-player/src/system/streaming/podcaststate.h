@@ -94,6 +94,27 @@ int podcaststate_in_progress(podcaststate_t *out, int max);
 // `image` is the podcast's artwork, for "Continue listening".
 void podcaststate_set_played_episode(const podcast_episode_t *episode, const char *image, bool played);
 
+// One episode of podcaststate_set_played_many().
+typedef struct {
+	char *path;						// its file in the Podcast folder; NULL for an episode of the catalogue
+	long long episode_id;			// of the catalogue; not read when `path` is given
+	char title[PODCAST_TITLE_MAX];	// of the catalogue; a file's is read from its tags
+	double duration;				// of the catalogue, in seconds; 0 when not known
+} podcaststate_mark_t;
+
+// Marks the episodes of one podcast heard or not: "Mark all as heard" in a
+// podcast's page. With `feed_id` every row of that podcast is marked first, in
+// one statement, whether it is among `episodes` or not. Then each of `episodes`
+// is marked as podcaststate_set_played() and podcaststate_set_played_episode()
+// would mark it, sixty-four to a transaction. One with no row is given one when
+// marking heard -- `show` and `image` are the podcast's name and artwork for a
+// row of the catalogue -- and is left without when marking not heard.
+//
+// Reads the sidecar and the tags of the files named: for a thread that is not
+// the interface's.
+void podcaststate_set_played_many(long long feed_id, const char *show, const char *image,
+								  const podcaststate_mark_t *episodes, int count, bool played);
+
 // A number that changes whenever a state is written: a page showing states
 // draws them again when it moves.
 unsigned podcaststate_revision(void);

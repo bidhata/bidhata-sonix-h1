@@ -310,7 +310,9 @@ size_t epub_xml_unescape(char *out, size_t out_size, const char *text, size_t le
 		if (body_len >= 2 && body[0] == '#') {
 			cp = (unsigned)strtoul(body[1] == 'x' || body[1] == 'X' ? body + 2 : body + 1, NULL,
 								   body[1] == 'x' || body[1] == 'X' ? 16 : 10);
-			known = cp != 0;
+			// Past the end of Unicode, or half of a surrogate pair: not a
+			// character, and left in the text as it was written.
+			known = cp != 0 && cp < 0x110000u && !(cp >= 0xD800u && cp <= 0xDFFFu);
 		} else {
 			for (size_t k = 0; k < sizeof(ENTITIES) / sizeof(ENTITIES[0]); k++) {
 				if (strlen(ENTITIES[k].name) == body_len && strncmp(ENTITIES[k].name, body, body_len) == 0) {

@@ -61,6 +61,12 @@ void qobuzart_release(const void *owner, int slot);
 // always false with `finished` true.
 bool qobuzart_take(const void *owner, int slot, cover_image_t *out, bool *finished);
 
+// Whether `owner` is the page holding the slots right now. A take that answers
+// "finished" with nothing to show means two different things: the cover could
+// not be had, or the slots went to another page while it was on its way. Only
+// the first is a reason never to ask for that cover again.
+bool qobuzart_owns(const void *owner);
+
 // Throws away the downloaded images. Goes with logging out: they were the
 // covers of what that account was listening to.
 void qobuzart_clear(void);

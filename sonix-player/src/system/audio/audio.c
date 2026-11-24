@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "src/system/audio/levelmeter.h"
 #include "src/system/audio/alsa-controls.h"
 #include "src/system/bluetooth/bluetooth.h"
 #include "src/system/decode/decode.h"
@@ -32,6 +33,7 @@
 #include <alloca.h>
 #include <alsa/asoundlib.h>
 #include <time.h>
+#include <math.h>
 
 // Millisecond timestamps for the play/start/end log lines, so the ordering and
 // the gaps between them can be read back.
@@ -2349,6 +2351,40 @@ static int pcm_wait_or_wake(snd_pcm_t *pcm, int timeout_ms) {
 	return (revents & POLLOUT) ? 1 : 0;
 }
 
+// ---------------------------------------------------------------------------
+// The level tap, for the player's meter
+//
+// What goes to the meter (levelmeter.h) is the samples as they are handed to
+// the card -- after the equaliser, the fades and the software volume, so it is
+// what the DAC receives. They are only read: no sample is touched, which is
+// what keeps a bit-perfect stream bit-perfect. Nothing at all while nobody has
+// asked (levelmeter_wanted).
+//
+// With each chunk goes how long it will be before it is heard: what the PCM
+// still holds once it has taken this one. A Bluetooth PCM counts its link and
+// the headphones' own delay into that figure, which is what is wanted here.
+//
+// A DSD stream carried as DoP is not levels -- its samples are packed bits --
+// so nothing is handed over and the meter rests.
+// ---------------------------------------------------------------------------
+
+// `ahead` when the chunk has not been written yet: its own length comes on top
+// of what the PCM holds.
+static void level_tap(snd_pcm_t *pcm, const void *buf, size_t frames, int channels, int rate, int bits, bool not_levels, bool ahead) {
+	if (not_levels || rate <= 0) {
+		return;
+	}
+	snd_pcm_sframes_t waiting = 0;
+	unsigned latency_ms = 0;
+	if (pcm && snd_pcm_delay(pcm, &waiting) == 0 && waiting > 0) {
+		latency_ms = (unsigned)((long long)waiting * 1000 / rate);
+	}
+	if (ahead) {
+		latency_ms += (unsigned)((long long)frames * 1000 / rate);
+	}
+	levelmeter_feed(buf, frames, channels, rate, bits, latency_ms);
+}
+
 static snd_pcm_sframes_t pcm_write_recover(snd_pcm_t **pcm, const void *buf, snd_pcm_uframes_t frames, int channels,
 										   int rate, int bits, snd_pcm_uframes_t *period) {
 	for (int attempt = 0; attempt < 8; attempt++) {
@@ -2400,6 +2436,9 @@ static snd_pcm_sframes_t pcm_write_recover(snd_pcm_t **pcm, const void *buf, snd
 			written = snd_pcm_writei(*pcm, buf, frames);
 		}
 		if (written >= 0) {
+			if (levelmeter_wanted()) {
+				level_tap(*pcm, buf, (size_t)written, channels, rate, bits, stream_dsd_multiple > 0, false);
+			}
 			playback_wrote(*pcm, (snd_pcm_uframes_t)written);
 			return written;
 		}
@@ -2713,11 +2752,16 @@ static void play_wav_file(const char *filepath) {
 
 	int frame_bytes = info.channels * (info.out_bits / 8);
 	long paused_at_ms = 0; // when the current pause began (device power-down clock)
-	char *buffer = malloc(period_size * frame_bytes);
+	// How many frames the two buffers below hold, and so how many one turn
+	// reads. Kept apart from period_size: a reopen in pcm_write_recover() or
+	// pcm_reroute() writes the new device's period there, and the buffers do
+	// not follow it. Only the unpause below resizes them.
+	snd_pcm_uframes_t chunk_frames = period_size;
+	char *buffer = malloc(chunk_frames * frame_bytes);
 	// What is read from the file, when it is not already what the device takes.
 	unsigned char *raw = NULL;
 	if (buffer && wav_needs_conversion(&info)) {
-		raw = malloc(period_size * (size_t)src_frame_bytes);
+		raw = malloc(chunk_frames * (size_t)src_frame_bytes);
 		if (!raw) {
 			free(buffer);
 			buffer = NULL;
@@ -2726,6 +2770,8 @@ static void play_wav_file(const char *filepath) {
 	if (!buffer) {
 		fprintf(stderr, "Audio: Out of memory for period buffer\n");
 		snd_pcm_close(pcm_handle);
+		pcm_device_open = false; // the suspend path waits on this
+		playback_follow(NULL);
 		fclose(f);
 		pthread_mutex_lock(&audio_mutex);
 		audio_command = AUDIO_CMD_STOP;
@@ -2901,7 +2947,7 @@ static void play_wav_file(const char *filepath) {
 						pthread_mutex_unlock(&audio_mutex);
 						break;
 					}
-					if (new_period > period_size) {
+					if (new_period > chunk_frames) {
 						char *bigger = realloc(buffer, new_period * frame_bytes);
 						if (bigger) {
 							buffer = bigger;
@@ -2926,6 +2972,7 @@ static void play_wav_file(const char *filepath) {
 						}
 						buffer = bigger;
 					}
+					chunk_frames = new_period;
 					period_size = new_period;
 					fprintf(stderr, "audio[%ld]: device taken back for the unpause\n", log_ms());
 					// A reopen is a fresh start for the sink as much as a new
@@ -2963,7 +3010,7 @@ static void play_wav_file(const char *filepath) {
 		// metadata, not audio.
 		health_mark(&health);
 		int64_t left = info.data_size - read_pos;
-		size_t want = period_size * (size_t)src_frame_bytes;
+		size_t want = chunk_frames * (size_t)src_frame_bytes;
 		if ((int64_t)want > left) {
 			want = left > 0 ? (size_t)left : 0;
 		}
@@ -3345,6 +3392,8 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 	if (!buffer) {
 		fprintf(stderr, "Audio: Out of memory for period buffer\n");
 		snd_pcm_close(pcm_handle);
+		pcm_device_open = false; // the suspend path waits on this
+		playback_follow(NULL);
 		set_dac_dop(0);
 		decoder_close(dec);
 		pthread_mutex_lock(&audio_mutex);
@@ -4081,7 +4130,11 @@ static void *playback_thread_func(void *arg) {
 // looks dead: prev does nothing and local tracks will not start.
 static bool playback_reader_should_abort(void) {
 	pthread_mutex_lock(&audio_mutex);
-	bool out = audio_command != AUDIO_CMD_PLAY || play_request || stop_thread || seek_request;
+	// RESUME is not a reason: a loop that is writing takes it for PLAY at its
+	// next turn, and the write given up for it would drop a chunk that nothing
+	// winds back to.
+	bool playing = audio_command == AUDIO_CMD_PLAY || audio_command == AUDIO_CMD_RESUME;
+	bool out = !playing || play_request || stop_thread || seek_request;
 	pthread_mutex_unlock(&audio_mutex);
 	return out;
 }
@@ -4176,6 +4229,10 @@ int audio_play_at(const char *filepath, double start_secs) {
 	if (start_secs > 0) {
 		seek_request = true;
 		seek_target_secs = start_secs;
+	} else {
+		// A seek the previous track never got to is not this file's.
+		seek_request = false;
+		seek_target_secs = -1.0;
 	}
 	progress_current_secs = start_secs > 0 ? start_secs : 0;
 	progress_floor_secs = -1.0;
@@ -4201,6 +4258,10 @@ int audio_play_paused(const char *filepath, double start_secs) {
 	if (start_secs > 0) {
 		seek_request = true;
 		seek_target_secs = start_secs;
+	} else {
+		// A seek the previous track never got to is not this file's.
+		seek_request = false;
+		seek_target_secs = -1.0;
 	}
 	progress_current_secs = start_secs > 0 ? start_secs : 0;
 	progress_floor_secs = -1.0;
@@ -4264,13 +4325,24 @@ bool audio_suspend_quiesce(int timeout_ms) {
 	pthread_cond_broadcast(&audio_cond);
 	pthread_mutex_unlock(&audio_mutex);
 
-	for (int waited = 0; waited < timeout_ms; waited += 20) {
-		if (!pcm_device_open && !gapless_holding()) {
-			return true;
+	bool closed = false;
+	for (int waited = 0; waited < timeout_ms && !closed; waited += 20) {
+		closed = !pcm_device_open && !gapless_holding();
+		if (!closed) {
+			usleep(20 * 1000);
 		}
-		usleep(20 * 1000);
 	}
-	return !pcm_device_open && !gapless_holding();
+	if (!closed) {
+		closed = !pcm_device_open && !gapless_holding();
+	}
+
+	// The request ends with this call. A playback thread that was inside a
+	// track never reached the wait that reads it, and left standing it would
+	// close the PCM held at the end of that track, between two gapless ones.
+	pthread_mutex_lock(&audio_mutex);
+	hold_flush_request = false;
+	pthread_mutex_unlock(&audio_mutex);
+	return closed;
 }
 
 bool audio_playback_context_active(void) { return playback_context_active; }
@@ -4668,8 +4740,24 @@ bool audio_external_begin_latency(int sample_rate, int channels, int bits, int b
 	}
 
 	if (external_pcm) {
+		// Already open: usable only by a caller whose frames are the ones the
+		// PCM was opened for. external_frame_bytes and the device's own format
+		// belong to the holder, and frames of another shape written through
+		// them are read past the end of the caller's buffer and play as noise.
+		bool same = sample_rate == external_rate && channels == external_channels && bits == external_bits;
+		if (!same) {
+			static long said_ms;
+			long now = log_ms();
+			if (said_ms == 0 || now - said_ms >= 2000) {
+				said_ms = now;
+				fprintf(stderr,
+						"audio: the output is held by an external source at %d Hz, %d ch, %d bits; not opened for %d Hz, "
+						"%d ch, %d bits\n",
+						external_rate, external_channels, external_bits, sample_rate, channels, bits);
+			}
+		}
 		pthread_mutex_unlock(&external_lock);
-		return true; // already open, and on the same terms
+		return same;
 	}
 
 	// One frame is one sample per channel. 24-bit is the odd one out -- ALSA's
@@ -4828,6 +4916,10 @@ int audio_external_write(const void *frames, int count) {
 		return 0;
 	}
 
+	if (levelmeter_wanted()) {
+		level_tap(external_pcm, frames, (size_t)count, external_channels, external_rate, external_bits, false, true);
+	}
+
 	int written = 0;
 	long last_progress_ms = log_ms();
 	while (written < count) {
@@ -4875,6 +4967,43 @@ int audio_external_write(const void *frames, int count) {
 
 	pthread_mutex_unlock(&external_lock);
 	return written;
+}
+
+// How much of what was written has not been played yet, in milliseconds, or
+// -1 with no PCM (or one that will not say). The video player keeps its picture
+// in step with this: the frame to show is the one that belongs to the sample
+// leaving the DAC now, which is the last one written less this.
+//
+// Takes external_lock, which audio_external_write() holds for as long as it
+// blocks: call it from the thread that writes, between writes.
+int audio_external_delay_ms(void) {
+	pthread_mutex_lock(&external_lock);
+
+	int ms = -1;
+	snd_pcm_sframes_t frames = 0;
+	if (external_pcm && external_rate > 0 && snd_pcm_delay(external_pcm, &frames) == 0 && frames >= 0) {
+		ms = (int)((long long)frames * 1000 / external_rate);
+	}
+
+	pthread_mutex_unlock(&external_lock);
+	return ms;
+}
+
+// Starts the card on what has been written so far.
+//
+// A PCM begins to play only when its start threshold has been written, and
+// that is most of the buffer: right for a source that fills it and keeps it
+// full. The video player keeps much less than that waiting (it must not run
+// far ahead of its picture), so the threshold would never be reached at its
+// own pace -- measured, six seconds of creeping up to it before the first
+// sound. The same after every underrun, which leaves the PCM prepared and
+// waiting again. Does nothing to a PCM that is already running.
+void audio_external_start(void) {
+	pthread_mutex_lock(&external_lock);
+	if (external_pcm && snd_pcm_state(external_pcm) == SND_PCM_STATE_PREPARED) {
+		snd_pcm_start(external_pcm);
+	}
+	pthread_mutex_unlock(&external_lock);
 }
 
 void audio_external_end(void) {

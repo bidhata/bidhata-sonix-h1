@@ -52,6 +52,11 @@ struct hls {
 	char seen[SEEN_MAX][URL_MAX];
 	int seen_count;
 	int seen_next;
+	// The media sequence number of the next segment to take, once one has been
+	// taken: `seen` holds SEEN_MAX addresses, and a manifest longer than that
+	// would otherwise offer its first segments again as new.
+	bool have_next_seq;
+	long long next_seq;
 
 	// Elementary stream already stripped of its container and not yet read.
 	unsigned char *pending;
@@ -509,10 +514,33 @@ static int fetch_new_segments(hls_t *h, int max_segments) {
 
 	const char *td = strstr(text, "#EXT-X-TARGETDURATION:");
 	if (td) {
-		double d = strtod(td + 21, NULL);
+		double d = strtod(td + strlen("#EXT-X-TARGETDURATION:"), NULL);
 		if (d > 0.5 && d < 60.0) {
 			h->target_duration = d;
 		}
+	}
+
+	// Where this manifest starts counting, and how many segments it lists.
+	long long seq = 0;
+	const char *ms = strstr(text, "#EXT-X-MEDIA-SEQUENCE:");
+	if (ms) {
+		seq = strtoll(ms + strlen("#EXT-X-MEDIA-SEQUENCE:"), NULL, 10);
+	}
+	long long listed = 0;
+	for (const char *q = text; *q;) {
+		const char *eol = strchr(q, '\n');
+		if (*q != '#' && *q != '\r' && *q != '\n' && *q != ' ') {
+			listed++;
+		}
+		if (!eol) {
+			break;
+		}
+		q = eol + 1;
+	}
+	// A manifest that ends before the point already reached has started its
+	// count again (the encoder was restarted): follow it from its top.
+	if (h->have_next_seq && seq + listed < h->next_seq) {
+		h->have_next_seq = false;
 	}
 
 	int taken = 0;
@@ -533,17 +561,25 @@ static int fetch_new_segments(hls_t *h, int max_segments) {
 			continue;
 		}
 
+		long long this_seq = seq++;
+		if (h->have_next_seq && this_seq < h->next_seq) {
+			continue; // played already, however long ago
+		}
+
 		char abs[URL_MAX];
 		resolve_url(h->media_url, line, abs, sizeof(abs));
 		if (!abs[0] || already_seen(h, abs)) {
 			continue;
 		}
 		remember(h, abs);
+		h->have_next_seq = true;
+		h->next_seq = this_seq + 1;
 
 		char *body = NULL;
 		size_t body_len = 0;
 		if (!http_get(abs, &body, &body_len, SEGMENT_MAX, FETCH_TIMEOUT_SECS)) {
-			fprintf(stderr, "hls: segment did not arrive: %s\n", http_last_error());
+			const char *err = http_last_error();
+			fprintf(stderr, "hls: segment did not arrive: %s\n", err ? err : "no reason given");
 			continue;
 		}
 		if (body_len == 0) {
@@ -645,7 +681,8 @@ hls_t *hls_open(const char *url, char *why, size_t why_size) {
 	// has to be resolved against that edge.
 	if (!http_get(url, &text, &text_len, MANIFEST_MAX, FETCH_TIMEOUT_SECS)) {
 		if (why && why_size) {
-			snprintf(why, why_size, "%s", http_last_error());
+			const char *err = http_last_error();
+			snprintf(why, why_size, "%s", err ? err : "");
 		}
 		return NULL;
 	}
@@ -684,7 +721,8 @@ hls_t *hls_open(const char *url, char *why, size_t why_size) {
 		text_len = 0;
 		if (!http_get(h->media_url, &text, &text_len, MANIFEST_MAX, FETCH_TIMEOUT_SECS)) {
 			if (why && why_size) {
-				snprintf(why, why_size, "%s", http_last_error());
+				const char *err = http_last_error();
+				snprintf(why, why_size, "%s", err ? err : "");
 			}
 			free(h);
 			return NULL;

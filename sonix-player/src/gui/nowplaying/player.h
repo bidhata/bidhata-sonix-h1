@@ -68,6 +68,16 @@ void player_layout_set(player_layout_t layout);
 bool player_cover_accent(void);
 void player_cover_accent_set(bool on);
 
+// The level meter over the foot of the sleeve (vumeter.h), in the Standard and
+// Studio arrangements. Off by default; saved in the config as [screen]
+// vu_meter.
+bool player_vu_meter(void);
+void player_vu_meter_set(bool on);
+// Its shape: 0 two bars, 1 two dials, 2 a spectrum (vumeter_style_t). Saved in
+// "screen"/vu_style. A tap on the meter moves to the next.
+int player_vu_style(void);
+void player_vu_style_set(int style);
+
 // The output the music was going to has just been unplugged -- a jack pulled
 // out, a USB-C DAC removed, headphones that walked out of range. Pauses, so
 // that taking the headphones off does not cost three tracks of an album, and

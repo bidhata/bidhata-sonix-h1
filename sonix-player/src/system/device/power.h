@@ -93,6 +93,26 @@ void display_set_rotated(bool rotated);
 // reuse is safe.
 uint16_t *display_capture_frame(int *out_w, int *out_h);
 
+// Drawing a full-screen moving picture without going through LVGL.
+//
+// The video player's frames would otherwise be made twice: converted into an
+// image, and then copied by LVGL into the framebuffer -- 768 KB a frame, an
+// eighth of the core at 25 frames a second, on a device where a film leaves
+// none to spare. display_direct_page() is the framebuffer page that is not on
+// screen, the panel's size in RGB565; the caller fills it and
+// display_direct_flip() puts it on screen, after which display_direct_page()
+// is the other one.
+//
+// LVGL knows nothing of this. Whoever uses it stops LVGL refreshing first and,
+// before letting it start again, invalidates the whole screen: both pages hold
+// the caller's picture by then, not what LVGL believes it drew.
+//
+// NULL when there is no such page: the plain fbdev fallback, the screen turned
+// upside down (LVGL then draws into RAM and the copy does the turning), and
+// the simulator.
+uint16_t *display_direct_page(void);
+void display_direct_flip(void);
+
 // --- Screen control (must be called on the LVGL/main thread) ---
 void power_screen_on(void);
 void power_screen_off(void);
@@ -192,6 +212,14 @@ bool power_charging_held(void);
 // shutdown, so a device switched off at its charge limit would come back to a
 // cable that does nothing until the next boot resets the chip.
 void power_charging_release(void);
+
+// The same from a signal handler: async-signal-safe calls only, on the node
+// power_init() found. Does nothing before power_init().
+void power_charging_release_from_signal(void);
+
+// One pass of the charge limit's decision, for a caller that runs without the
+// power tick (the charging screen). Reads the level from read_battery_percent().
+void power_charge_limit_tick(void);
 
 // Switches the device off the whole way: the playing position and the clock
 // saved, the streaming caches emptied, the card's databases closed and the

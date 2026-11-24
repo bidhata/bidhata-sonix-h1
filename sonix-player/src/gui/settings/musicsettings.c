@@ -1427,6 +1427,46 @@ static void cover_accent_cb(lv_event_t *e) {
 	player_cover_accent_set(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
+static lv_obj_t *vu_meter_switch;
+static lv_obj_t *vu_pills;
+static lv_obj_t *vu_pill[3];
+
+// Also when the page comes up: the shape may have been changed by a tap on the
+// meter itself.
+static void vu_refresh(void) {
+	if (!vu_meter_switch) {
+		return;
+	}
+	bool on = player_vu_meter();
+	if (on) {
+		lv_obj_add_state(vu_meter_switch, LV_STATE_CHECKED);
+	} else {
+		lv_obj_remove_state(vu_meter_switch, LV_STATE_CHECKED);
+	}
+	lv_obj_set_hidden(vu_pills, !on);
+	for (int i = 0; i < 3; i++) {
+		settingsrow_pill_active(vu_pill[i], i == player_vu_style());
+	}
+}
+
+static void vu_meter_cb(lv_event_t *e) {
+	player_vu_meter_set(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+	vu_refresh();
+}
+
+static void vu_loaded_cb(lv_event_t *e) {
+	(void)e;
+	vu_refresh();
+}
+
+static void vu_style_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	player_vu_style_set((int)(intptr_t)lv_event_get_user_data(e));
+	vu_refresh();
+}
+
 // ---------------------------------------------------------------------------
 // Which of the two arrangements the now-playing page uses
 //
@@ -1587,6 +1627,16 @@ static void build_nowplaying_page(gui_config_t *cfg) {
 		lv_obj_add_state(cover_accent_switch, LV_STATE_CHECKED);
 	}
 
+	// The level meter over the foot of the sleeve. Off by default.
+	settingsrow_toggle_pills(container, "musicsettings_vu_meter", vu_meter_cb, &vu_meter_switch, &vu_pills);
+	vu_pill[0] = settingsrow_pill(vu_pills, "musicsettings_vu_bars", 0, vu_style_cb);
+	vu_pill[1] = settingsrow_pill(vu_pills, "musicsettings_vu_dials", 1, vu_style_cb);
+	vu_pill[2] = settingsrow_pill(vu_pills, "musicsettings_vu_spectrum", 2, vu_style_cb);
+	option_note(container, "musicsettings_vu_meter_note");
+	vu_refresh();
+	theme_register_refresh(vu_refresh);
+	lv_obj_add_event_cb(nowplaying_screen, vu_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
+
 	// Whose name goes under the title on the now-playing page, in the control
 	// centre and on the screensaver: the album's artist, as the record is
 	// filed, or the track's own. Off by default -- see metadata_shown_artist().
@@ -1621,9 +1671,48 @@ static void endless_shuffle_cb(lv_event_t *e) {
 // stretch that suits one is not the one that suits another.
 static settingsrow_duration_t sleep_row;
 
+// The automatic sleep timer: one switch and a window of the day, for music,
+// books and podcasts alike. The two times are the same two-wheel card as a
+// length, with its switch put away: hours and minutes are what a time of day
+// is made of too.
+static lv_obj_t *sleep_auto_switch;
+static settingsrow_duration_t sleep_auto_start_row;
+static settingsrow_duration_t sleep_auto_end_row;
+
 static void sleep_refresh(void) {
 	settingsrow_duration_expanded(&sleep_row, sleeptimer_enabled(SLEEPTIMER_MUSIC));
+	bool automatic = sleeptimer_auto_enabled();
+	// The automatic timer counts the length on these wheels, so they stay in
+	// reach with the switch above them off.
+	if (automatic) {
+		lv_obj_set_hidden(sleep_row.wheels, false);
+	}
 	settingsrow_duration_repaint(&sleep_row);
+
+	if (!sleep_auto_switch) {
+		return; // the page is still being built
+	}
+	if (automatic) {
+		lv_obj_add_state(sleep_auto_switch, LV_STATE_CHECKED);
+	} else {
+		lv_obj_remove_state(sleep_auto_switch, LV_STATE_CHECKED);
+	}
+	lv_obj_set_hidden(sleep_auto_start_row.card, !automatic);
+	lv_obj_set_hidden(sleep_auto_end_row.card, !automatic);
+	settingsrow_duration_repaint(&sleep_auto_start_row);
+	settingsrow_duration_repaint(&sleep_auto_end_row);
+}
+
+static void sleep_auto_toggle_cb(lv_event_t *e) {
+	(void)e;
+	sleeptimer_set_auto_enabled(lv_obj_has_state(sleep_auto_switch, LV_STATE_CHECKED));
+	sleep_refresh();
+}
+
+static void sleep_auto_wheel_cb(lv_event_t *e) {
+	(void)e;
+	sleeptimer_set_auto_window(settingsrow_duration_minutes(&sleep_auto_start_row),
+							   settingsrow_duration_minutes(&sleep_auto_end_row));
 }
 
 static void sleep_toggle_cb(lv_event_t *e) {
@@ -1703,6 +1792,18 @@ static void build_playback_page(gui_config_t *cfg) {
 	// And again whenever the control centre switches something while the page
 	// is the one under it.
 	lv_obj_add_event_cb(playback_screen, playback_loaded_cb, LV_EVENT_REFRESH, NULL);
+
+	// The automatic one, under the timer whose length it borrows: the switch,
+	// what it does, and the two ends of its window, shown while it is on.
+	settingsrow_toggle(container, "musicsettings_sleep_auto", &sleep_auto_switch, sleep_auto_toggle_cb);
+	option_note(container, "musicsettings_sleep_auto_note");
+	settingsrow_toggle_duration(container, "musicsettings_sleep_auto_start", NULL, sleep_auto_wheel_cb, &sleep_auto_start_row);
+	settingsrow_toggle_duration(container, "musicsettings_sleep_auto_end", NULL, sleep_auto_wheel_cb, &sleep_auto_end_row);
+	lv_obj_set_hidden(sleep_auto_start_row.toggle, true);
+	lv_obj_set_hidden(sleep_auto_end_row.toggle, true);
+	settingsrow_duration_set_minutes(&sleep_auto_start_row, sleeptimer_auto_start());
+	settingsrow_duration_set_minutes(&sleep_auto_end_row, sleeptimer_auto_end());
+	sleep_refresh();
 
 	// One record into the next, instead of the queue simply running out.
 	settingsrow_toggle(container, "musicsettings_play_albums_back_to_back", &album_chain_switch, album_chain_cb);

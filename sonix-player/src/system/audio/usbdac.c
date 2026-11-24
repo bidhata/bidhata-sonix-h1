@@ -543,8 +543,11 @@ static void *audio_main(void *arg) {
 				// Say so, but keep reading: the gadget's OUT endpoint has to
 				// go on being drained or the host sees a device that stopped
 				// consuming and aborts the stream. Throwing the samples away
-				// keeps the link alive.
-				set_error(tr("usbdac_rate_refused"), fmt.rate);
+				// keeps the link alive. Said once for each rate and width: the
+				// open is tried again at every turn for as long as it fails.
+				if (fmt.rate != open_rate || bits != open_bits) {
+					set_error(tr("usbdac_rate_refused"), fmt.rate);
+				}
 			}
 			open_rate = fmt.rate;
 			open_bits = bits;

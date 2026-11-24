@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "src/system/audio/audio.h"
 #include "src/system/core/respath.h"
@@ -16,6 +17,10 @@
 #define RATE 44100
 #define MIX_FRAMES 441 // 10 ms
 #define BUFFER_MS 46
+
+// With a PCM that takes nothing, how many chunks pass between two attempts at
+// opening it again (a second).
+#define RETRY_CHUNKS 100
 
 // Samples at or below this level at the end of a file are cut off.
 #define TAIL_SILENCE 64
@@ -145,16 +150,34 @@ static void *mixer_main(void *unused) {
 
 	int32_t mix[MIX_FRAMES * 2];
 	int16_t out[MIX_FRAMES * 2];
+	int dry = 0; // chunks in a row the PCM did not take
+	bool open = true;
 	while (!stop_flag) {
 		mix_into(mix);
 		for (int i = 0; i < MIX_FRAMES * 2; i++) {
 			int32_t v = mix[i];
 			out[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
 		}
-		audio_external_write(out, MIX_FRAMES);
+		if (open && audio_external_write(out, MIX_FRAMES) >= MIX_FRAMES) {
+			dry = 0;
+			continue;
+		}
+		// The PCM took nothing -- the output moved and would not open again,
+		// or the write failed -- and it was the clock: the chunk is slept out,
+		// and the PCM opened afresh every RETRY_CHUNKS.
+		usleep(MIX_FRAMES * 1000000 / RATE);
+		if (++dry >= RETRY_CHUNKS) {
+			dry = 0;
+			if (open) {
+				audio_external_end();
+			}
+			open = audio_external_begin_latency(RATE, 2, 16, BUFFER_MS);
+		}
 	}
 
-	audio_external_end();
+	if (open) {
+		audio_external_end();
+	}
 	return NULL;
 }
 

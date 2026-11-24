@@ -80,19 +80,29 @@ bool gb_core_is_color(gb_core_t *core);
 
 // The battery-backed RAM, that is, the game's saves.
 //
-// `dir` is the directory to put the file in; it is named after the ROM with the
-// extension changed to `.sav`. NULL means "next to the ROM", which is what
-// Gearboy does by itself; the player always passes <card>/Games/Saves, so the
-// ROM folders stay exactly as whoever copied them left them and the saves can
-// be carried off together.
+// `dir` is the directory to put the file in; it is named after the ROM, its
+// extension included, with `.sav` after it ("Zelda.gbc.sav"), so a .gb and a
+// .gbc of the same name keep a file each. A file named the other way, with
+// `.sav` in place of the ROM's extension, is read when that one does not exist.
+// NULL means "next to the ROM", which is what Gearboy does by itself; the
+// player always passes <card>/Games/Saves, so the ROM folders stay exactly as
+// whoever copied them left them and the saves can be carried off together.
 //
 // On a cartridge without a battery they do nothing, which is fine: the core
 // knows and needs no asking.
+//
+// Saving writes a new file and renames it over the old one. False when it
+// could not be written. gb_core_save_ram_if_changed() writes only when the RAM
+// differs from what was last loaded or written, so it can be called often.
+// All three belong on the emulator thread, between frames.
 void gb_core_load_ram(gb_core_t *core, const char *dir);
-void gb_core_save_ram(gb_core_t *core, const char *dir);
+bool gb_core_save_ram(gb_core_t *core, const char *dir);
+bool gb_core_save_ram_if_changed(gb_core_t *core, const char *dir);
 
 // Save states: the whole machine frozen, not just the cartridge battery. Same
-// `dir`, and the file is named after the ROM with extension `.state<index>`.
+// `dir`, and the file is the ROM's name with `.state<index>` after it; as with
+// the .sav, one named without the ROM's extension is read when that is all
+// there is.
 //
 // One slot for now (index 1), because the menu offers one. The number is there
 // anyway: adding more is a line in the menu, not a change to the format of

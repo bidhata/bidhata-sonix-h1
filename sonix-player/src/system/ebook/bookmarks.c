@@ -129,6 +129,21 @@ bool bookmark_add(const char *book_path, uint32_t spine, uint32_t block, uint32_
 			char *space = strrchr(bm.text, ' ');
 			if (space && space > bm.text + sizeof(bm.text) / 2) {
 				*space = '\0';
+			} else {
+				// No space to cut at, which is every line of a language written
+				// without them. The cut may then have fallen inside a character:
+				// its last bytes are dropped rather than stored as half of one.
+				size_t lead = len;
+				while (lead > 0 && ((unsigned char)bm.text[lead - 1] & 0xC0u) == 0x80u) {
+					lead--;
+				}
+				if (lead > 0) {
+					unsigned char c = (unsigned char)bm.text[lead - 1];
+					size_t need = c < 0x80u ? 1u : (c & 0xE0u) == 0xC0u ? 2u : (c & 0xF0u) == 0xE0u ? 3u : 4u;
+					if (len - (lead - 1) < need) {
+						bm.text[lead - 1] = '\0';
+					}
+				}
 			}
 		}
 	}

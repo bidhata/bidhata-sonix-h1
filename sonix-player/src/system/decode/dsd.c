@@ -166,6 +166,12 @@ static bool parse_dff(dsd_file_t *d) {
 		}
 		uint64_t size = be64d(ch + 4);
 		uint64_t body = pos + 12;
+		// The audio chunk may run to the end of a file whose outer size is
+		// short; every other chunk has to fit inside its container, or the
+		// position worked out from its size wraps and the walk never ends.
+		if (memcmp(ch, "DSD ", 4) != 0 && size > end - body) {
+			return false;
+		}
 		if (memcmp(ch, "PROP", 4) == 0 && size >= 4) {
 			(void)read_at(d->fd, body, ch + 12, 4);
 		}
@@ -201,7 +207,11 @@ static bool parse_dff(dsd_file_t *d) {
 		}
 
 		// Every chunk is padded to an even length, and the size does not say so.
-		pos = body + size + (size & 1);
+		uint64_t next = body + size + (size & 1);
+		if (next <= pos) {
+			return false; // wrapped: not a size a real file has
+		}
+		pos = next;
 	}
 	return false;
 }
@@ -321,6 +331,10 @@ static bool produce(dsd_file_t *d) {
 		int pairs = available / 2;
 		if (pairs > d->pcm_capacity) {
 			pairs = d->pcm_capacity;
+		}
+		if (pairs == 0) {
+			d->chan_read = d->chan_len; // one byte left over: less than a frame
+			continue;
 		}
 		for (int i = 0; i < pairs; i++) {
 			uint32_t marker = d->dop_phase ? 0xFA : 0x05;

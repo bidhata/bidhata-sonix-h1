@@ -7,7 +7,9 @@
 #include "src/gui/shell/theme.h"
 #include "src/system/core/lang.h"
 
-#define POPOVER_MAX_ITEMS 7
+// As many as the longest menu any caller builds: the keyboard's list of
+// layouts, which can hold every one of them (KB_LAYOUT_COUNT).
+#define POPOVER_MAX_ITEMS 11
 #define POPOVER_WIDTH 284
 #define POPOVER_ROW_HEIGHT 62
 #define POPOVER_RADIUS 16
@@ -72,7 +74,10 @@ void popover_init(void) {
 	lv_obj_set_style_pad_gap(card, 0, 0);
 	lv_obj_set_style_shadow_width(card, 0, 0);
 	lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_scrollable(card, false);
+	// A menu taller than the panel is capped at its height (popover_show) and
+	// scrolls inside the card; one that fits has nothing to scroll.
+	lv_obj_set_scroll_dir(card, LV_DIR_VER);
+	lv_obj_set_scroll_elastic(card, false);
 	// A tap on the card itself must not fall through to the veil.
 	lv_obj_set_event_bubble(card, false);
 }
@@ -145,6 +150,8 @@ void popover_show(lv_obj_t *anchor, const popover_item_t *items, int count) {
 	// otherwise; slid horizontally to stay on screen.
 	lv_area_t a;
 	lv_obj_get_coords(anchor, &a);
+	lv_obj_set_style_max_height(card, lv_display_get_vertical_resolution(lv_display_get_default()) - 2 * POPOVER_MARGIN, 0);
+	lv_obj_scroll_to_y(card, 0, LV_ANIM_OFF);
 	lv_obj_update_layout(card);
 
 	int screen_w = lv_obj_get_width(veil);

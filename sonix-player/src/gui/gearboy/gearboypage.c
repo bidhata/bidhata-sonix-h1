@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "lvgl/lvgl.h"
 
@@ -182,7 +183,11 @@ static void *scan_thread(void *arg) {
 	res->list = list;
 	res->count = count;
 
-	gui_post(scan_done_cb, res);
+	// The page waits for this answer before it scans again, so it has to
+	// arrive.
+	while (!gui_post(scan_done_cb, res)) {
+		usleep(50 * 1000);
+	}
 	return NULL;
 }
 

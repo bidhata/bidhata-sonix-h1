@@ -1,9 +1,5 @@
 #include "gearboyplay.h"
 
-// LVGL 9.2 made lv_timer_t opaque. There is a lv_timer_set_period() but no
-// getter, and both places here have to read the period before changing it.
-#include "lvgl/src/misc/lv_timer_private.h"
-
 #include <stdio.h>
 #include <string.h>
 
@@ -12,7 +8,9 @@
 #include "src/gb/gbcore.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/gearboy/gearboysettings.h"
+#include "src/gui/settings/screensaver.h"
 #include "src/gui/shell/icons.h"
+#include "src/gui/shell/powermenu.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/topbar.h"
@@ -20,6 +18,8 @@
 #include "src/system/gearboy/gbinput.h"
 #include "src/system/gearboy/gearboy.h"
 #include "src/system/core/lang.h"
+#include "src/system/core/panel.h"
+#include "src/system/device/power.h"
 
 lv_obj_t *gearboyplay_screen;
 
@@ -122,30 +122,6 @@ lv_obj_t *gearboyplay_screen;
 // elsewhere doubling the refresh rate would double the interface's idle work,
 // and the standby logic rewrites this period for itself anyway.
 #define GAME_REFRESH_MS 16
-
-static uint32_t saved_refresh_ms;
-
-static void refresh_period_set(uint32_t ms) {
-	lv_display_t *disp = lv_display_get_default();
-	lv_timer_t *timer = disp ? lv_display_get_refr_timer(disp) : NULL;
-	if (!timer) {
-		return;
-	}
-	if (!saved_refresh_ms) {
-		saved_refresh_ms = timer->period;
-	}
-	lv_timer_set_period(timer, ms);
-}
-
-static void refresh_period_restore(void) {
-	lv_display_t *disp = lv_display_get_default();
-	lv_timer_t *timer = disp ? lv_display_get_refr_timer(disp) : NULL;
-	if (!timer || !saved_refresh_ms) {
-		return;
-	}
-	lv_timer_set_period(timer, saved_refresh_ms);
-	saved_refresh_ms = 0;
-}
 
 // The panel height, from gui_config_t at init.
 static int panel_h = PANEL_H_REF;
@@ -265,12 +241,30 @@ static void menu_on_gui_thread(void *unused) {
 
 static void menu_requested(void) { gui_post(menu_on_gui_thread, NULL); }
 
+// True from the moment the touchscreen reader has the glass until this page
+// takes it back with release_glass().
+static bool glass_grabbed;
+
 // Takes the touchscreen back after the menu handed it to LVGL.
 static void grab_glass(void) {
 	gbinput_zone_t zones[16];
 	int n = build_zones(zones, 16);
-	if (!gbinput_start(zones, n, menu_requested)) {
+	glass_grabbed = gbinput_start(zones, n, menu_requested);
+	if (!glass_grabbed) {
 		fprintf(stderr, "gearboyplay: single-finger controls (multitouch not available)\n");
+	}
+}
+
+// Hands the glass back to LVGL. A finger still down -- the one that asked for
+// the menu, or a thumb resting on the pad -- is not a press on whatever lies
+// under it: LVGL drops it up to its release.
+static void release_glass(void) {
+	gbinput_stop();
+	glass_grabbed = false;
+	for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+		if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+			lv_indev_wait_release(indev);
+		}
 	}
 }
 
@@ -410,7 +404,7 @@ static void menu_open(void) {
 	// window in which the emulator runs with nobody feeding it keys, seen as a
 	// character that keeps walking on its own.
 	gearboy_set_paused(true);
-	gbinput_stop();
+	release_glass();
 	fallback_keys = 0;
 
 	menu_opened_ms = lv_tick_get();
@@ -668,9 +662,39 @@ static void report_state_result(void) {
 	}
 }
 
+// Whether the panel was lit at the last tick, to catch it coming back.
+static bool screen_was_lit = true;
+
+// The glass, looked after once a tick while the reader has it.
+static void watch_glass(void) {
+	// The reader gave up by itself (its node went away): the glass is nobody's
+	// until it is handed back, and the drawn buttons take over.
+	if (glass_grabbed && !gbinput_active()) {
+		fprintf(stderr, "gearboyplay: the touch reader stopped; single-finger controls\n");
+		gbinput_stop();
+		glass_grabbed = false;
+	}
+
+	// The power menu and the screensaver come up over this page and are worked
+	// by touch, which LVGL does not have while the reader does. The game stops
+	// as for its own menu, which is what is found underneath afterwards.
+	if (glass_grabbed && (powermenu_is_open() || screensaver_is_visible())) {
+		menu_open();
+	}
+
+	// Lighting the panel switches every indev back on (power.c), LVGL's touch
+	// included, while the reader still has the glass: it is parked again.
+	bool lit = power_screen_is_on();
+	if (lit && !screen_was_lit && glass_grabbed) {
+		panel_touch_enable(false);
+	}
+	screen_was_lit = lit;
+}
+
 static void poll_cb(lv_timer_t *timer) {
 	(void)timer;
 
+	watch_glass();
 	report_state_result();
 
 	const uint16_t *pixels = gearboy_screen();
@@ -760,7 +784,7 @@ static void screen_loaded_cb(lv_event_t *e) {
 	set_veil(VEIL_STARTING);
 	lv_timer_resume(poll_timer);
 	lv_timer_ready(poll_timer);
-	refresh_period_set(GAME_REFRESH_MS);
+	gui_refresh_period_set(GAME_REFRESH_MS);
 }
 
 static void screen_unloaded_cb(lv_event_t *e) {
@@ -780,6 +804,7 @@ static void screen_unloaded_cb(lv_event_t *e) {
 	// Release the glass first, then stop the game. The other order leaves the
 	// reader writing keys into an emulator that is shutting down.
 	gbinput_stop();
+	glass_grabbed = false;
 	fallback_keys = 0;
 
 	// The image stops pointing at the frame buffer BEFORE gearboy_stop() frees
@@ -799,7 +824,7 @@ static void screen_unloaded_cb(lv_event_t *e) {
 		gearboy_stop();
 	}
 
-	refresh_period_restore();
+	gui_refresh_period_restore();
 
 	volume_overlay_allow_outside_player(false);
 	back_btn_force_hidden(false);

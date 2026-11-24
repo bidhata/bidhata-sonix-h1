@@ -7,6 +7,7 @@
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 #include "src/system/decode/growfile.h"
+#include "src/gui/shell/gui.h"
 #include "src/system/device/system.h"
 #include "src/system/library/library.h"
 #include "src/system/library/metadata.h"
@@ -1608,7 +1609,10 @@ void device_state_scrub_by(double delta) {
 	pthread_mutex_unlock(&scrub_lock);
 }
 
-void device_state_scrub_commit(void) {
+// On the interface thread: the seek can start the track again, which rewrites
+// the loaded metadata and walks the queue, neither of which is locked.
+static void scrub_commit_cb(void *user) {
+	(void)user;
 	pthread_mutex_lock(&scrub_lock);
 	bool was = scrubbing;
 	double target = scrub_target;
@@ -1622,6 +1626,13 @@ void device_state_scrub_commit(void) {
 	// the position was counted on.
 	if (was && strcmp(file, current_metadata_file) == 0) {
 		device_state_seek(target);
+	}
+}
+
+void device_state_scrub_commit(void) {
+	// Called from the input thread, where the button comes up.
+	if (!gui_post(scrub_commit_cb, NULL)) {
+		scrub_cancel(); // not left open, freezing the position shown
 	}
 }
 

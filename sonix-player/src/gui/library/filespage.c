@@ -1,8 +1,10 @@
 #include "filespage.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdio_ext.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,9 +27,11 @@
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/toast.h"
+#include "src/gui/video/videoplay.h"
 #include "src/system/core/lang.h"
 #include "src/system/core/utils.h"
 #include "src/system/device/system.h"
+#include "src/system/device/usb.h"
 #include "src/system/library/library.h"
 #include "src/system/playback/playlist.h"
 
@@ -180,6 +184,7 @@ static const char *const EXT_TEXT[] = {"lrc", "txt", "t", "ini", "nfo", NULL};
 static const char *const EXT_FIRMWARE[] = {"upt", NULL};
 static const char *const EXT_GAME[] = {"gb", "gbc", "sav", NULL};
 static const char *const EXT_BOOK[] = {"epub", NULL};
+static const char *const EXT_VIDEO[] = {"mp4", "m4v", "mkv", "avi", "mov", "mpg", "mpeg", NULL};
 
 static const lv_image_dsc_t *glyph_for(const entry_t *entry) {
 	if (entry->dir) {
@@ -221,7 +226,7 @@ static bool ext_is_known(const char *name) {
 	const char *ext = ext_of(name);
 	return ext[0] && (ext_in(ext, EXT_AUDIO) || ext_in(ext, EXT_AUDIOBOOK) || ext_in(ext, EXT_PLAYLIST) ||
 					  ext_in(ext, EXT_IMAGE) || ext_in(ext, EXT_TEXT) || ext_in(ext, EXT_FIRMWARE) ||
-					  ext_in(ext, EXT_GAME) || ext_in(ext, EXT_BOOK));
+					  ext_in(ext, EXT_GAME) || ext_in(ext, EXT_BOOK) || ext_in(ext, EXT_VIDEO));
 }
 
 // The player's own way of putting a size on screen, the same one the transfer
@@ -340,12 +345,19 @@ static void read_folder(void) {
 // the actions
 // ---------------------------------------------------------------------------
 
+// True once the card is no longer the player's to write to: handed to a
+// computer over USB, or taken out. Asked between one entry and the next and
+// between one chunk and the next by everything below that writes, on whichever
+// thread it runs, so a long job stops there instead of carrying on into a card
+// that is being unmounted.
+static bool card_gone(void) { return usb_storage_active() || !storage_card_attached(); }
+
 // Deletes a folder and everything in it. Written out rather than shelling out
 // to `rm -rf`: there is no shell on the device worth trusting with a path the
 // user typed, and this way a name with a quote in it is just a name.
 static bool remove_tree(const char *target) {
 	struct stat st;
-	if (lstat(target, &st) != 0) {
+	if (card_gone() || lstat(target, &st) != 0) {
 		return false;
 	}
 	if (!S_ISDIR(st.st_mode)) {
@@ -362,6 +374,10 @@ static bool remove_tree(const char *target) {
 		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
 			continue;
 		}
+		if (card_gone()) {
+			ok = false;
+			break;
+		}
 		char child[PATH_MAX_LEN + NAME_MAX + 2];
 		snprintf(child, sizeof(child), "%s/%s", target, de->d_name);
 		if (!remove_tree(child)) {
@@ -369,7 +385,7 @@ static bool remove_tree(const char *target) {
 		}
 	}
 	closedir(dir);
-	return rmdir(target) == 0 && ok;
+	return ok && rmdir(target) == 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,8 +453,14 @@ static bool copy_file(const char *from, const char *to) {
 	}
 
 	bool ok = true;
+	bool gone = false;
 	size_t got;
 	while ((got = fread(buffer, 1, COPY_CHUNK, in)) > 0) {
+		if (card_gone()) {
+			gone = true;
+			ok = false;
+			break;
+		}
 		if (fwrite(buffer, 1, got, out) != got) {
 			ok = false;
 			break;
@@ -451,12 +473,18 @@ static bool copy_file(const char *from, const char *to) {
 
 	free(buffer);
 	fclose(in);
+	if (gone) {
+		// Nothing more goes to a card that has been handed over: what stdio
+		// still holds is dropped rather than flushed by the close.
+		__fpurge(out);
+	}
 	if (fclose(out) != 0) {
 		ok = false;
 	}
 	// A half-written copy is worse than none: it looks like a file and plays
-	// like a corrupt one.
-	if (!ok) {
+	// like a corrupt one. Left where it is on a card that is gone, since
+	// removing it would be one more write to that card.
+	if (!ok && !gone && !card_gone()) {
 		unlink(to);
 	}
 	return ok;
@@ -471,7 +499,7 @@ static bool copy_tree(const char *from, const char *to) {
 		return copy_file(from, to);
 	}
 
-	if (mkdir(to, 0777) != 0) {
+	if (card_gone() || mkdir(to, 0777) != 0) {
 		return false;
 	}
 
@@ -484,6 +512,10 @@ static bool copy_tree(const char *from, const char *to) {
 	while ((de = readdir(dir)) != NULL) {
 		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
 			continue;
+		}
+		if (card_gone()) {
+			ok = false;
+			break;
 		}
 		char child_from[PATH_MAX_LEN + NAME_MAX + 2];
 		char child_to[PATH_MAX_LEN + NAME_MAX + 2];
@@ -546,17 +578,22 @@ static void op_finished(void *user) {
 	rebuild();
 }
 
-static void *op_worker(void *arg) {
-	(void)arg;
-	thread_be_background("filesop");
-
-	if (pending_op == OP_MOVE) {
+// The job itself, on whichever thread runs it.
+static void op_run(void) {
+	// The copy below takes the target's place only if nothing is there, which
+	// is also what lets a failed copy be cleared away afterwards: whatever
+	// stands at the target then was put there by this job.
+	struct stat there;
+	if (card_gone() || lstat(op_target, &there) == 0) {
+		op_ok = false;
+	} else if (pending_op == OP_MOVE) {
 		// Within one card a move is a rename and costs nothing. Across a
 		// boundary the kernel says EXDEV and there is no shortcut: it becomes a
 		// copy and then a delete, in that order, so a failure halfway leaves the
-		// original where it was.
+		// original where it was. Any other refusal is the answer, and the move
+		// has failed.
 		op_ok = rename(op_source, op_target) == 0;
-		if (!op_ok) {
+		if (!op_ok && errno == EXDEV) {
 			// Only now is there anything to count, and the count is worth its
 			// own walk of the tree: without it the bar has no scale, and a walk
 			// costs one stat per file against a read and a write of every byte.
@@ -565,7 +602,11 @@ static void *op_worker(void *arg) {
 			op_total_bytes = total;
 			pthread_mutex_unlock(&op_lock);
 
-			op_ok = copy_tree(op_source, op_target) && remove_tree(op_source);
+			if (copy_tree(op_source, op_target)) {
+				op_ok = remove_tree(op_source);
+			} else if (!card_gone()) {
+				remove_tree(op_target); // a partial copy is not left behind
+			}
 		}
 	} else {
 		uint64_t total = tree_bytes(op_source);
@@ -574,14 +615,23 @@ static void *op_worker(void *arg) {
 		pthread_mutex_unlock(&op_lock);
 
 		op_ok = copy_tree(op_source, op_target);
+		if (!op_ok && !card_gone()) {
+			remove_tree(op_target); // a partial copy is not left behind
+		}
 	}
 
-	if (!gui_post(op_finished, NULL)) {
-		// The queue was full, which leaves the modal up over a finished job.
-		// Nothing else can take it down, so it is taken down from here and the
-		// list is left to the next thing that rebuilds it.
-		op_ok = false;
-		pending_op = OP_NONE;
+}
+
+static void *op_worker(void *arg) {
+	(void)arg;
+	thread_be_background("filesop");
+	op_run();
+
+	// gui_post refuses when its queue is full, and a result that is dropped
+	// leaves the modal up over a finished job with nothing to take it down.
+	// Asked again until the queue has room.
+	while (!gui_post(op_finished, NULL)) {
+		usleep(100000);
 	}
 	return NULL;
 }
@@ -598,8 +648,10 @@ static void op_start(void) {
 	if (pthread_create(&thread, NULL, op_worker, NULL) != 0) {
 		// No thread to be had: do it here rather than not at all, and accept
 		// the pause. No timer either: nothing would run it, since the interface
-		// thread is the one inside the copy.
-		op_worker(NULL);
+		// thread is the one inside the copy. The result is taken straight
+		// away too, this being the thread it would be posted to.
+		op_run();
+		op_finished(NULL);
 		return;
 	}
 	pthread_detach(thread);
@@ -611,6 +663,11 @@ static void op_start(void) {
 static void delete_confirmed(void *user) {
 	(void)user;
 	if (!acting_on[0]) {
+		return;
+	}
+	if (!gui_card_available()) {
+		acting_on[0] = '\0';
+		gui_notify_no_card();
 		return;
 	}
 
@@ -690,6 +747,9 @@ static void pick_row_cb(lv_event_t *e) {
 	lv_obj_scroll_to_y(pick_list, 0, LV_ANIM_OFF);
 }
 
+// The row's own copy of its folder name goes with the row.
+static void pick_row_deleted_cb(lv_event_t *e) { free(lv_event_get_user_data(e)); }
+
 // Folders only: nothing else can be a destination, and a list of every track on
 // the card would bury the three folders that can.
 static void pick_rebuild(void) {
@@ -762,6 +822,7 @@ static void pick_rebuild(void) {
 			break;
 		}
 		lv_obj_add_event_cb(row, pick_row_cb, LV_EVENT_CLICKED, kept);
+		lv_obj_add_event_cb(row, pick_row_deleted_cb, LV_EVENT_DELETE, kept);
 
 		lv_obj_t *glyph = lv_image_create(row);
 		lv_image_set_src(glyph, &icon_folder);
@@ -805,6 +866,10 @@ static bool path_is_within(const char *inner, const char *outer) {
 static void pick_here_cb(lv_event_t *e) {
 	(void)e;
 	if (pending_op == OP_NONE || !acting_on[0]) {
+		return;
+	}
+	if (!gui_card_available()) {
+		gui_notify_no_card();
 		return;
 	}
 
@@ -887,6 +952,11 @@ static bool name_is_usable(const char *name) {
 static void name_accept_cb(lv_event_t *e) {
 	(void)e;
 
+	if (!gui_card_available()) {
+		gui_notify_no_card();
+		return;
+	}
+
 	const char *name = lv_textarea_get_text(name_field);
 	if (!name_is_usable(name)) {
 		gui_notify_popup("files_name_invalid");
@@ -966,7 +1036,8 @@ static void row_clicked_cb(lv_event_t *e) {
 		return;
 	}
 
-	// A text file opens to be read and a picture to be looked at. Any other
+	// A text file opens to be read, a picture to be looked at and a video
+	// to be watched. Any other
 	// file has nothing to open into, and the tap does nothing: the menu is what
 	// the three dots are for, and a row that opens a menu when pressed anywhere
 	// is a row that opens one every time a scroll ends on it.
@@ -977,6 +1048,8 @@ static void row_clicked_cb(lv_event_t *e) {
 			gui_notify_popup("files_text_unreadable");
 		} else if (ext_in(ext, EXT_IMAGE) && child_path(entries[index].name, file, sizeof(file))) {
 			imageview_open(file);
+		} else if (ext_in(ext, EXT_VIDEO) && child_path(entries[index].name, file, sizeof(file))) {
+			videoplay_open(file);
 		}
 		return;
 	}
@@ -1172,6 +1245,12 @@ static void loaded_cb(lv_event_t *e) {
 }
 
 void filespage_open(void) {
+	// Without the card there is only the empty folder it is mounted on, and
+	// nothing on this page may write there.
+	if (!gui_card_available()) {
+		gui_notify_no_card();
+		return;
+	}
 	snprintf(path, sizeof(path), "%s", root_path);
 	switch_screen(filespage_screen);
 }

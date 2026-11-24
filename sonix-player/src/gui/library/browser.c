@@ -10,6 +10,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "lvgl/lvgl.h"
 
@@ -829,7 +830,11 @@ static void *gather_worker(void *arg) {
 	for (int i = 0; i < g->root_count && more; i++) {
 		more = g->root_is_dir[i] ? gather_walk(g, g->roots[i], 0) : gather_add(g, g->roots[i]);
 	}
-	gui_post(gather_done_cb, g);
+	// gui_post refuses when its queue is full, and a result that is dropped
+	// leaves the page gathering for ever. Asked again until there is room.
+	while (!gui_post(gather_done_cb, g)) {
+		usleep(100000);
+	}
 	return NULL;
 }
 
@@ -1197,9 +1202,9 @@ static bool list_directory(const char *path, listing_t *out, cue_sheet_t *sheets
 				char label[220];
 				const char *title = sheets->tracks[t].title;
 				if (title[0]) {
-					snprintf(label, sizeof(label), "%d. %s", sheets->tracks[t].number, title);
+					snprintf(label, sizeof(label), "%d. %s", sheets->tracks[t].written, title);
 				} else {
-					snprintf(label, sizeof(label), "%d", sheets->tracks[t].number);
+					snprintf(label, sizeof(label), "%d", sheets->tracks[t].written);
 				}
 
 				if (out->count >= MAX_ENTRIES || !listing_add(out, label, file, false)) {

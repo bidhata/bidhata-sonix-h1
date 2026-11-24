@@ -28,6 +28,7 @@ void gearboy_set_paused(bool paused) { (void)paused; }
 bool gearboy_paused(void) { return false; }
 void gearboy_request_savestate(void) {}
 void gearboy_request_loadstate(void) {}
+void gearboy_save_now(void) {}
 int gearboy_take_state_result(void) { return 0; }
 void gearboy_refresh_video_settings(void) {}
 
@@ -46,6 +47,7 @@ void gearboy_refresh_video_settings(void) {}
 #include "src/system/audio/audio.h"
 #include "src/system/core/config.h"
 #include "src/system/gearboy/gbdb.h"
+#include "src/system/streaming/radio.h"
 
 // APU rate. 44100 is what this DAC plays without any resampling, and what
 // Gearboy is tuned for.
@@ -60,6 +62,14 @@ void gearboy_refresh_video_settings(void) {}
 // real frame produces at 44100 Hz, so the paused loop ticks at the same rate as
 // the running one and resuming finds the buffer neither empty nor full.
 #define PAUSE_FRAMES 738
+
+// The battery RAM goes to the card on the way into a pause and, while playing,
+// every this many frames (half a minute) -- each time only if it has changed.
+#define RAM_FLUSH_FRAMES 1800
+
+// With a PCM that takes nothing, how many frames pass between two attempts at
+// opening it again (a second).
+#define AUDIO_RETRY_FRAMES 60
 
 // The only savestate slot the menu offers. See gbcore.h for why the number
 // exists at all.
@@ -117,6 +127,10 @@ static volatile bool paused_flag;
 static volatile bool want_savestate;
 static volatile bool want_loadstate;
 static volatile int state_result;
+
+// Raised by gearboy_save_now(): the thread writes the battery RAM at its next
+// pass and lowers it.
+static volatile bool want_ram_flush;
 
 static char rom_path[512];
 static char title[GEARBOY_TITLE_MAX];
@@ -188,9 +202,10 @@ bool gearboy_present(void) {
 			blit3x(gb_frames[index], screen);
 		}
 		__sync_synchronize();
-		// Only once the core has advanced by as many frames as there are
-		// buffers can it have started overwriting this one.
-		if (frame_count - before < GB_FRAME_BUFFERS) {
+		// With two buffers the core's next frame goes into this one as soon
+		// as it has published the other: any advance of the count may mean
+		// this buffer was being written while it was read.
+		if (frame_count == before) {
 			return true;
 		}
 	}
@@ -212,6 +227,18 @@ void gearboy_set_paused(bool paused) {
 
 void gearboy_request_savestate(void) { want_savestate = true; }
 void gearboy_request_loadstate(void) { want_loadstate = true; }
+
+void gearboy_save_now(void) {
+	if (!running_flag) {
+		return;
+	}
+	want_ram_flush = true;
+	// A pass of the loop is one frame, or one write of silence. A second is
+	// what a card that has stopped answering gets.
+	for (int waited = 0; want_ram_flush && running_flag && waited < 1000; waited += 5) {
+		usleep(5000);
+	}
+}
 
 int gearboy_take_state_result(void) {
 	int r = state_result;
@@ -346,6 +373,34 @@ static void publish_frame(void) {
 // the worker thread
 // ---------------------------------------------------------------------------
 
+static void flush_ram(gb_core_t *core, const char *saves, bool only_if_changed) {
+	bool ok = only_if_changed ? gb_core_save_ram_if_changed(core, saves) : gb_core_save_ram(core, saves);
+	if (!ok) {
+		fprintf(stderr, "gearboy: the battery RAM could not be written to %s\n", saves);
+	}
+}
+
+// Hands `frames` to the PCM, whose blocking write is the loop's clock. When
+// the PCM does not take them -- the output moved and would not open again, or
+// the write failed -- the frame is slept out instead, and the PCM is opened
+// afresh every AUDIO_RETRY_FRAMES. Clears `*have_audio` when that open fails:
+// from then on the loop paces itself.
+static void write_audio(const int16_t *samples, int frames, bool *have_audio, int *dry) {
+	if (audio_external_write(samples, frames) >= frames) {
+		*dry = 0;
+		return;
+	}
+	usleep(16000);
+	if (++*dry >= AUDIO_RETRY_FRAMES) {
+		*dry = 0;
+		audio_external_end();
+		*have_audio = audio_external_begin_latency(SAMPLE_RATE, 2, 16, AUDIO_BUFFER_MS);
+		if (!*have_audio) {
+			fprintf(stderr, "gearboy: the audio output would not open again; playing silently\n");
+		}
+	}
+}
+
 static void *emu_worker(void *unused) {
 	(void)unused;
 
@@ -400,6 +455,13 @@ static void *emu_worker(void *unused) {
 
 	printf("gearboy: %s (%s) -- %s\n", title, gb_core_rom_name(core), gb_core_is_color(core) ? "colour" : "DMG");
 
+	// A station holds the output through the same external path this is about
+	// to open, and a PCM has one writer. Here rather than in gearboy_start():
+	// stopping a stream takes long enough to be seen as a freeze.
+	if (radio_is_playing()) {
+		radio_stop();
+	}
+
 	// If the PCM does not open the game still runs, silently: a mute game beats
 	// a game that will not start. Without it there is no clock either, so the
 	// loop has to pace itself.
@@ -408,7 +470,16 @@ static void *emu_worker(void *unused) {
 		fprintf(stderr, "gearboy: no audio; playing silently\n");
 	}
 
+	int audio_dry = 0;		 // frames in a row the PCM did not take
+	int frames_since_flush = 0;
+	bool pause_flushed = false; // the RAM was written on the way into this pause
+
 	while (!stop_flag) {
+		if (want_ram_flush) {
+			flush_ram(core, saves, false);
+			want_ram_flush = false;
+		}
+
 		// Video settings changed by the page are applied here, between frames,
 		// the only moment the core is idle.
 		if (want_video_settings) {
@@ -420,6 +491,14 @@ static void *emu_worker(void *unused) {
 		// silence: that is what paces the loop (see gearboy.h) and what keeps
 		// the DAC from underrunning and clicking on resume.
 		if (paused_flag) {
+			// A pause is where the game is put down, and the device may be
+			// switched off from here without the game being left first.
+			if (!pause_flushed) {
+				pause_flushed = true;
+				frames_since_flush = 0;
+				flush_ram(core, saves, true);
+			}
+
 			// The menu's two requests are served here, the only point where the
 			// core is stopped with no frame in flight through it.
 			if (want_savestate) {
@@ -443,12 +522,13 @@ static void *emu_worker(void *unused) {
 
 			if (have_audio) {
 				memset(audio_buf, 0, (size_t)PAUSE_FRAMES * 2 * sizeof(*audio_buf));
-				audio_external_write(audio_buf, PAUSE_FRAMES);
+				write_audio(audio_buf, PAUSE_FRAMES, &have_audio, &audio_dry);
 			} else {
 				usleep(16000);
 			}
 			continue;
 		}
+		pause_flushed = false;
 
 		gb_core_set_keys(core, key_mask);
 
@@ -460,11 +540,16 @@ static void *emu_worker(void *unused) {
 			// samples counts interleaved values, two per audio frame, while the
 			// write wants frames. The thread blocks in here, and that wait is
 			// what paces everything else.
-			audio_external_write(audio_buf, samples / 2);
+			write_audio(audio_buf, samples / 2, &have_audio, &audio_dry);
 		} else if (!have_audio) {
 			// No PCM, no clock. A flat 16 ms is not the exact 16.743, but with
 			// no sound to stay in step with, nobody hears the difference.
 			usleep(16000);
+		}
+
+		if (++frames_since_flush >= RAM_FLUSH_FRAMES) {
+			frames_since_flush = 0;
+			flush_ram(core, saves, true);
 		}
 	}
 
@@ -474,7 +559,7 @@ static void *emu_worker(void *unused) {
 
 	// Flush cartridge RAM before dropping the core, or the player's progress is
 	// lost.
-	gb_core_save_ram(core, saves);
+	flush_ram(core, saves, false);
 
 done:
 	if (core) {
@@ -532,6 +617,7 @@ bool gearboy_start(const char *rom_path_in, const char *title_in) {
 	paused_flag = false;
 	want_savestate = false;
 	want_loadstate = false;
+	want_ram_flush = false;
 	state_result = 0;
 	stop_flag = false;
 	failed_flag = false;

@@ -17,9 +17,17 @@
 // the wire.
 //
 // The API account comes from the streaming keys ([lastfm]); without it the
-// service is unavailable. Signing in trades the username and password for a
-// session key (auth.getMobileSession), which is what is kept, beside
-// device_config.ini; the password is not.
+// service is unavailable. Signing in ends with a session key, which is what is
+// kept, beside device_config.ini. There are two roads to it:
+//
+//   * on a phone (lastfm_web_login_start): the player asks Last.fm for a token
+//     and shows the address that carries it as a QR code; the user opens it,
+//     signs in there and allows the application, and the player trades the
+//     token for the session (auth.getToken, auth.getSession). No password
+//     passes through the player.
+//   * with the password typed on the player (lastfm_login,
+//     auth.getMobileSession), which Last.fm does not allow every API account
+//     to use. The password is not kept.
 
 typedef enum {
 	LASTFM_STATE_UNAVAILABLE, // no API keys in the streaming keys
@@ -36,7 +44,10 @@ typedef enum {
 	LASTFM_LOGIN_WRONG_CREDENTIALS,
 	LASTFM_LOGIN_NO_REPLY,
 	LASTFM_LOGIN_REFUSED, // `detail` says why
+	LASTFM_LOGIN_EXPIRED, // on a phone: not allowed there in time
 } lastfm_login_result_t;
+
+#define LASTFM_WEB_URL_MAX 256
 
 typedef struct {
 	lastfm_state_t state;
@@ -48,6 +59,10 @@ typedef struct {
 	// Moves each time a sign-in attempt finishes; `login_result` is how it did.
 	unsigned login_serial;
 	lastfm_login_result_t login_result;
+	// While a sign-in on a phone waits to be allowed there: the address to
+	// open, which is what the QR code holds. Empty before Last.fm has given
+	// the token, and when no such sign-in is under way.
+	char web_url[LASTFM_WEB_URL_MAX];
 } lastfm_status_t;
 
 // Reads the session and the queue and starts the worker. Call once, after
@@ -67,6 +82,13 @@ bool lastfm_active(void);
 // as the request has been built.
 void lastfm_login(const char *user, const char *password);
 void lastfm_logout(void);
+// Signing in on a phone. Start returns at once: the address appears in the
+// status when it is ready, and the attempt ends by itself, through
+// login_serial and login_result, when the user has allowed it, when Last.fm
+// refuses, or after ten minutes. Cancel gives it up without a result. Starting
+// while another sign-in is under way does nothing.
+void lastfm_web_login_start(void);
+void lastfm_web_login_cancel(void);
 
 void lastfm_get_status(lastfm_status_t *out);
 

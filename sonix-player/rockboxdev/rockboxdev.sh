@@ -108,7 +108,7 @@ getfile_ex() {
             tool="$tool -T 60 -O "
         else
             echo "ROCKBOXDEV: No downloader tool found (curl/wget)."
-            exit
+            exit 1
         fi
     else
         echo "ROCKBOXDEV: Downloading $1 using curl"
@@ -123,7 +123,7 @@ getfile_ex() {
         fi
     done
     echo "ROCKBOXDEV: couldn't download the file!"
-    exit
+    exit 1
 }
 
 getfile() {
@@ -168,13 +168,13 @@ gettool() {
                     longterm_ver=""
                     top_dir="v3.x"
                     ;;
-                *) echo "ROCKBOXDEV: I don't know how to handle kernel version $version"; exit ;;
+                *) echo "ROCKBOXDEV: I don't know how to handle kernel version $version"; exit 1 ;;
             esac
             base_url="$LINUX_MIRROR/kernel/$top_dir"
             url="$base_url $base_url/longterm/v$longterm_ver $base_url/longterm"
             ext="tar.gz"
             ;;
-        *) echo "ROCKBOXDEV: Bad toolname $toolname"; exit ;;
+        *) echo "ROCKBOXDEV: Bad toolname $toolname"; exit 1 ;;
     esac
     getfile_ex "$file.$ext" "$srv_file.$ext" $url
 }
@@ -193,7 +193,7 @@ extract() {
         tar xJf "$dlwhere/$1.tar.xz"
     else
         echo "ROCKBOXDEV: unknown compression for $1"
-        exit
+        exit 1
     fi
 }
 
@@ -205,6 +205,22 @@ run_cmd() {
         echo "ROCKBOXDEV: an error occurred, please see $logfile"
         exit 1
     fi
+}
+
+# Applies a patch to a source tree once. A tree a failed run left behind is
+# not extracted again, and already carries the patches that run applied: the
+# marker file says which.
+apply_patch() {
+    local srcdir="$1"
+    local name="$2"
+    local p="$3"
+    if [ -f "$srcdir/.rbdev-applied-$p" ]; then
+        echo "ROCKBOXDEV: $name patch $p already applied"
+        return
+    fi
+    echo "ROCKBOXDEV: applying $name patch $p"
+    (cd "$srcdir" && patch -p1 < "$patch_dir/$p") || exit 1
+    : > "$srcdir/.rbdev-applied-$p"
 }
 
 check_restart() {
@@ -366,16 +382,13 @@ build_hiby_toolchain() {
 
     # Apply patches
     for p in $binutils_patches; do
-        echo "ROCKBOXDEV: applying binutils patch $p"
-        (cd "$builddir/binutils-$binutils_ver" && patch -p1 < "$patch_dir/$p") || exit
+        apply_patch "$builddir/binutils-$binutils_ver" "binutils" "$p"
     done
     for p in $glibc_patches; do
-        echo "ROCKBOXDEV: applying glibc patch $p"
-        (cd "$builddir/glibc-$glibc_ver" && patch -p1 < "$patch_dir/$p") || exit
+        apply_patch "$builddir/glibc-$glibc_ver" "glibc" "$p"
     done
     for p in $linux_patches; do
-        echo "ROCKBOXDEV: applying linux patch $p"
-        (cd "$builddir/linux-$linux_ver" && patch -p1 < "$patch_dir/$p") || exit
+        apply_patch "$builddir/linux-$linux_ver" "linux" "$p"
     done
 
     # 1. Binutils
@@ -543,6 +556,11 @@ builddir=$($READLINK -f "$builddir" 2>/dev/null || echo "$builddir")
 
 mkdir -p "$dlwhere" "$HOST_PREFIX" "$builddir"
 
+# There from here to the end of a build that went through: the Makefile takes
+# it to mean that the compiler in the prefix is not yet a whole toolchain.
+incomplete_marker="$HOST_PREFIX/.rbdev-incomplete"
+: > "$incomplete_marker"
+
 echo "Host install prefix: $HOST_PREFIX"
 echo "Download directory:  $dlwhere"
 echo "Build directory:     $builddir"
@@ -557,6 +575,7 @@ build_hiby_toolchain
 
 cd "$INITIAL_DIR"
 rm -r "$TMP"
+rm -f "$incomplete_marker"
 
 echo ""
 echo "ROCKBOXDEV: Done!"

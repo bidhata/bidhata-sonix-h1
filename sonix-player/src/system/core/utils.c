@@ -60,22 +60,31 @@ char *read_file_content(const char *filename) {
 		return NULL;
 	}
 
-	fseek(file, 0, SEEK_END);
-	long filesize = ftell(file);
-	fseek(file, 0, SEEK_SET);
-
-	char *content = (char *)malloc(filesize + 1); // +1 for the null terminator
-	if (content == NULL) {
-		fclose(file);
-		return NULL;
+	// Read until the end rather than sized from a seek: a /proc file refuses
+	// the seek and reports no size, and a sysfs one reports a whole page.
+	size_t capacity = 4096;
+	size_t length = 0;
+	char *content = (char *)malloc(capacity + 1); // +1 for the null terminator
+	while (content != NULL) {
+		size_t bytes_read = fread(content + length, 1, capacity - length, file);
+		length += bytes_read;
+		if (bytes_read == 0 || length < capacity) {
+			break;
+		}
+		char *bigger = (char *)realloc(content, capacity * 2 + 1);
+		if (bigger == NULL) {
+			free(content);
+			content = NULL;
+			break;
+		}
+		content = bigger;
+		capacity *= 2;
 	}
 
-	// Terminate at what was actually read, which can be short of filesize.
-	size_t bytes_read = fread(content, 1, filesize, file);
-	content[bytes_read] = '\0';
-
 	fclose(file);
-
+	if (content != NULL) {
+		content[length] = '\0';
+	}
 	return content;
 }
 

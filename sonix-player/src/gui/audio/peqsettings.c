@@ -206,6 +206,13 @@ static void name_cancel_cb(lv_event_t *e) {
 	name_layer_hide();
 }
 
+// The chevron stays up over the layer, so the page can be left with it open:
+// it is put away then, or it would be what the page shows the next time.
+static void name_screen_unloaded_cb(lv_event_t *e) {
+	(void)e;
+	name_layer_hide();
+}
+
 static void name_accept_cb(lv_event_t *e) {
 	(void)e;
 
@@ -254,6 +261,7 @@ static void build_name_dialog(gui_config_t *cfg) {
 	lv_obj_set_style_pad_all(name_layer, 0, 0);
 	lv_obj_set_scrollable(name_layer, false);
 	lv_obj_set_hidden(name_layer, true);
+	lv_obj_add_event_cb(settings_screen, name_screen_unloaded_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 
 	lv_obj_t *heading = lv_label_create(name_layer);
 	lv_label_set_text(heading, tr("preset_name"));

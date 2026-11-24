@@ -84,7 +84,11 @@ static void countdown_cb(lv_timer_t *timer) {
 static void countdown_start(int mv) {
 	printf("power: battery at %d%% or under (%d mV), shutting down in %d s\n", OFF_PERCENT, mv, COUNTDOWN_S);
 	countdown_left = COUNTDOWN_S;
-	confirm_close(); // the 5 % notice, if it is still up
+	// The 5 % notice, if it is still up. A question somebody else is asking
+	// stays where it is, under the countdown, with its answer still to give.
+	if (!confirm_question_open()) {
+		confirm_close();
+	}
 	if (!power_screen_is_on()) {
 		power_screen_on();
 	}
@@ -124,6 +128,11 @@ static void check_cb(lv_timer_t *timer) {
 	// Only in the band above the shutdown: a player switched on at 1 % goes
 	// straight to the countdown.
 	if (!warned && percent <= WARN_PERCENT) {
+		// The notice and a question share one dialog. While a question is up
+		// the notice waits for the next check, so the answer is not lost.
+		if (confirm_question_open()) {
+			return;
+		}
 		warned = true;
 		printf("power: battery at %d%%\n", percent);
 		char message[200];

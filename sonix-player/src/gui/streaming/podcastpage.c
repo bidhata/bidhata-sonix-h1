@@ -14,6 +14,7 @@
 #include "src/gui/shell/keyboard.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/shell/pagetimer.h"
+#include "src/gui/shell/confirm.h"
 #include "src/gui/shell/popover.h"
 #include "src/gui/shell/toast.h"
 #include "src/gui/nowplaying/cover.h"
@@ -206,6 +207,13 @@ static char result_title[160];
 // next job: without that, a second job could rewrite the arrays while the first
 // was still being drawn.
 static bool result_pending;
+
+// The worker has taken a job that writes a list into the result arrays and has
+// not delivered it yet. have_pending is already down by then and result_pending
+// not yet up, so without this the lists drawn on the spot (show_followed_now,
+// show_card_now) would take the worker for idle and write the same arrays
+// under it. Under job_lock.
+static bool worker_on_list;
 
 // Kept for the heading, whose reserved width follows the corner buttons.
 static gui_config_t *g_cfg;
@@ -576,10 +584,17 @@ static void art_poll_cb(lv_timer_t *timer) {
 		bool finished = false;
 		if (!qobuzart_take(&podcast_art_owner, slot, &image, &finished)) {
 			if (finished) {
-				// Failed: this address is never requested again.
-				fail_cover(row);
-				freed = true;
 				slot_owner[slot] = -1;
+				// Only while the slots are this page's does "nothing" mean the
+				// cover could not be had: that address is then never requested
+				// again. Once they are another page's, the row is simply asked
+				// for again when this one is next shown -- and nothing is asked
+				// for from here meanwhile, which would take the slots back from
+				// the page on screen.
+				if (qobuzart_owns(&podcast_art_owner)) {
+					fail_cover(row);
+					freed = true;
+				}
 			}
 			continue;
 		}
@@ -1548,6 +1563,39 @@ static bool fetch_episode(const podcast_episode_t *e, char *out, size_t size) {
 	return true;
 }
 
+// The episode playback is stopped on did not come down, and nothing asks for
+// it a second time: the wait ends here, with a word, instead of holding the
+// Wi-Fi awake for a download that is not coming. Starting the episode again
+// asks for it again.
+static void fetch_gave_up_async(void *user) {
+	long long *gone = user;
+	long long id = *gone;
+	free(gone);
+	if (!waiting_for_episode) {
+		return;
+	}
+	int index = playlist_current_index();
+	char path[512];
+	if (index < 0 || !playlist_path_at(index, path, sizeof(path)) || podcastcache_episode_id(path) != id) {
+		return;
+	}
+	waiting_for_episode = false;
+	gui_notify_popup("download_failed");
+}
+
+// On the fetch thread. The id goes over on the heap: it is 64 bits and a
+// pointer here is 32.
+static void fetch_gave_up(long long id) {
+	long long *gone = malloc(sizeof(*gone));
+	if (!gone) {
+		return;
+	}
+	*gone = id;
+	if (!gui_post(fetch_gave_up_async, gone)) {
+		free(gone);
+	}
+}
+
 static void *fetch_main(void *arg) {
 	(void)arg;
 	thread_be_background("podcast fetch");
@@ -1559,8 +1607,9 @@ static void *fetch_main(void *arg) {
 		}
 		long long id = fetch_want_id;
 		long long feed = fetch_want_feed;
-		pthread_mutex_unlock(&fetch_lock);
 
+		// Still under the lock, and copied out under it: the worker rewrites the
+		// list whenever another podcast's episodes arrive.
 		podcast_episode_t episode;
 		bool known = false;
 		for (int i = 0; i < queued_count && !known; i++) {
@@ -1569,6 +1618,7 @@ static void *fetch_main(void *arg) {
 				known = true;
 			}
 		}
+		pthread_mutex_unlock(&fetch_lock);
 
 		// Not known does not mean lost: ask the catalogue.
 		//
@@ -1582,10 +1632,14 @@ static void *fetch_main(void *arg) {
 			if (!podcast_episode_in_feed(feed, id, &episode)) {
 				fprintf(stderr, "podcast: %lld not found there either: %s\n", id, podcast_last_error());
 				pthread_mutex_lock(&fetch_lock);
-				if (fetch_want_id == id) {
+				bool still_wanted = fetch_want_id == id;
+				if (still_wanted) {
 					fetch_want_id = 0;
 				}
 				pthread_mutex_unlock(&fetch_lock);
+				if (still_wanted) {
+					fetch_gave_up(id);
+				}
 				continue;
 			}
 		}
@@ -1607,7 +1661,8 @@ static void *fetch_main(void *arg) {
 		}
 
 		pthread_mutex_lock(&fetch_lock);
-		if (fetch_want_id == id) {
+		bool still_wanted = fetch_want_id == id;
+		if (still_wanted) {
 			fetch_want_id = 0;
 		}
 		bool superseded = fetch_want_id != 0 && fetch_want_id != id;
@@ -1615,6 +1670,8 @@ static void *fetch_main(void *arg) {
 
 		if (ok && !superseded) {
 			gui_post(resume_if_waiting_async, NULL);
+		} else if (!ok && still_wanted) {
+			fetch_gave_up(id);
 		}
 	}
 	return NULL;
@@ -1636,10 +1693,49 @@ static void fetch_start_thread(void) {
 // results coming back, on the GUI thread
 // ---------------------------------------------------------------------------
 
-static void play_started_async(void *user) {
-	(void)user;
-	player_refresh_now_playing();
-	switch_screen(player_screen);
+// The queue the worker has prepared, handed to the GUI thread to be started.
+//
+// The play queue has no lock and belongs to the GUI thread, which reads it from
+// several timers: the worker downloads and works out the paths, and loading
+// them into the queue is done here.
+typedef struct {
+	int count;
+	double position; // where to start the first one from; below zero for its top
+	char paths[][512];
+} play_start_t;
+
+static void play_start_async(void *user) {
+	play_start_t *ps = user;
+	const char **list = malloc((size_t)ps->count * sizeof(*list));
+	if (list) {
+		for (int i = 0; i < ps->count; i++) {
+			list[i] = ps->paths[i];
+		}
+		// _ordered: a podcast queue already has its order, newest first going
+		// back. Plain device_state_play_list would shuffle the episodes
+		// whenever the play mode is random.
+		device_state_play_list_ordered_at(list, ps->count, 0, ps->position);
+		free(list);
+		player_refresh_now_playing();
+		switch_screen(player_screen);
+	}
+	free(ps);
+}
+
+// Hands a finished job to the GUI thread. A full queue is tried again for a few
+// seconds rather than given up on: the veil only comes down in job_done_cb(),
+// and a result dropped here would leave it over the whole interface. Past that
+// the result is let go, so the worker is not held by a GUI that takes nothing.
+static void post_result(void (*done)(void *)) {
+	for (int tries = 0; tries < 100; tries++) {
+		if (gui_post(done, NULL)) {
+			return;
+		}
+		usleep(50 * 1000);
+	}
+	pthread_mutex_lock(&job_lock);
+	result_pending = false;
+	pthread_mutex_unlock(&job_lock);
 }
 
 static void job_done_cb(void *user) {
@@ -1715,7 +1811,9 @@ static void feed_done_cb(void *user) {
 	// open, or an earlier step of the same list.
 	bool latest = ticket == feed_last_ticket;
 	if (latest && n >= 0) {
+		pthread_mutex_lock(&fetch_lock);
 		memcpy(result_episodes, queued_episodes, sizeof(result_episodes[0]) * (size_t)n);
+		pthread_mutex_unlock(&fetch_lock);
 		feed_count = n;
 		feed_want = feed_answer_want;
 		feed_more_flag = feed_answer_full && n < PODCAST_MAX_HELD;
@@ -1741,25 +1839,34 @@ static void run_feed_job(const job_t *job) {
 	}
 	feed_answer_error[0] = '\0';
 	feed_answer_has_info = job->feed != 0 && podcast_feed(job->id, &feed_answer_info);
-	int n = podcast_episodes(job->id, queued_episodes, want);
-	if (n < 0) {
+	// The answer is read into a buffer of its own and copied into
+	// queued_episodes under the fetch thread's lock: that thread looks episodes
+	// up in the array, and the request takes seconds to fill it.
+	podcast_episode_t *got = malloc(sizeof(*got) * (size_t)want);
+	int n = got ? podcast_episodes(job->id, got, want) : -1;
+	int raw = n >= 0 ? podcast_last_raw_count() : 0;
+	if (n < 0 && got) {
 		snprintf(feed_answer_error, sizeof(feed_answer_error), "%s", podcast_last_error());
-		// The array may hold part of an answer: nothing in it is to be trusted.
+	}
+	pthread_mutex_lock(&fetch_lock);
+	if (n < 0) {
 		queued_count = 0;
 		feed_answer_full = false;
 	} else {
-		int raw = podcast_last_raw_count();
+		memcpy(queued_episodes, got, sizeof(*got) * (size_t)n);
 		queued_count = n;
 		queued_complete = want >= PODCAST_MAX_HELD || raw < want;
 		feed_answer_full = raw >= want;
 	}
+	pthread_mutex_unlock(&fetch_lock);
+	free(got);
 	feed_answer_ticket = (unsigned)job->index;
 	feed_answer_count = n;
 	feed_answer_want = want;
 	pthread_mutex_lock(&job_lock);
 	result_pending = true;
 	pthread_mutex_unlock(&job_lock);
-	gui_post(feed_done_cb, NULL);
+	post_result(feed_done_cb);
 }
 
 unsigned podcastpage_feed_load(long long feed_id, int want, bool with_info) {
@@ -1797,6 +1904,12 @@ bool podcastpage_feed_more(void) { return feed_more_flag; }
 // growing file in the middle needs the bytes there first. Gives up -- and the
 // episode starts from the top -- after two minutes, when the server did not
 // say how long the file is, or when another job has been asked for.
+static void resume_wait_async(void *user) {
+	(void)user;
+	busy_hide();
+	gui_notify_popup("downloading");
+}
+
 static double wait_for_resume_point(const char *path, double resume, double duration) {
 	if (resume <= 0 || !growfile_is_growing(path)) {
 		return resume;
@@ -1806,6 +1919,7 @@ static double wait_for_resume_point(const char *path, double resume, double dura
 		return 0;
 	}
 	double reached = 0;
+	bool told = false;
 	for (int tick = 0; tick < 600; tick++) {
 		long done = 0, total = 0;
 		if (!growfile_span(g, &done, &total)) {
@@ -1826,6 +1940,13 @@ static double wait_for_resume_point(const char *path, double resume, double dura
 		pthread_mutex_unlock(&job_lock);
 		if (superseded) {
 			break;
+		}
+		// A wait that can last two minutes is not spent under the veil: it
+		// comes down, with a word about why nothing is playing yet, and
+		// anything asked for meanwhile ends the wait just above.
+		if (!told) {
+			told = true;
+			gui_post(resume_wait_async, NULL);
 		}
 		usleep(200000);
 	}
@@ -1863,7 +1984,6 @@ static bool play_queued_from(int index) {
 	// going back in time. The others are not downloaded now -- they come
 	// down when their turn arrives (see podcastpage_prepare_track).
 	static char paths[PODCAST_QUEUE_MAX][512];
-	static const char *path_ptr[PODCAST_QUEUE_MAX];
 	int count = 0;
 	for (int i = index; i < queued_count && count < PODCAST_QUEUE_MAX; i++) {
 		if (i == index) {
@@ -1884,15 +2004,22 @@ static bool play_queued_from(int index) {
 										q->feed_title[0] ? q->feed_title : NULL, q->feed_id,
 										browsing_author, browsing_image, q->image, false);
 		}
-		path_ptr[count] = paths[count];
 		count++;
 	}
 
-	// _ordered: a podcast queue already has its order, newest first
-	// going back. Plain device_state_play_list would shuffle the
-	// episodes whenever the play mode is random.
-	device_state_play_list_ordered_at(path_ptr, count, 0, resume > 0 ? resume : -1.0);
-	gui_post(play_started_async, NULL);
+	// Started on the GUI thread, which owns the play queue: a copy of the paths
+	// goes over, since this array is written again by the next tap.
+	play_start_t *ps = malloc(sizeof(*ps) + (size_t)count * sizeof(ps->paths[0]));
+	if (ps) {
+		ps->count = count;
+		ps->position = resume > 0 ? resume : -1.0;
+		memcpy(ps->paths, paths, (size_t)count * sizeof(ps->paths[0]));
+	}
+	if (!ps || !gui_post(play_start_async, ps)) {
+		free(ps);
+		snprintf(result_error, sizeof(result_error), "%s", tr("download_failed"));
+		return false;
+	}
 	return true;
 }
 
@@ -1920,6 +2047,7 @@ static void *worker_main(void *arg) {
 
 		job_t job = pending;
 		have_pending = false;
+		worker_on_list = job_is_list(job.kind);
 		pthread_mutex_unlock(&job_lock);
 
 		// A podcast's page: its own answer, which leaves the list on this page
@@ -2004,9 +2132,11 @@ static void *worker_main(void *arg) {
 				snprintf(result_error, sizeof(result_error), "%s", tr("podcast_that_episode_is_gone"));
 				break;
 			}
+			pthread_mutex_lock(&fetch_lock);
 			memcpy(queued_episodes, result_episodes, sizeof(result_episodes[0]) * (size_t)feed_count);
 			queued_count = feed_count;
 			queued_complete = !feed_more_flag;
+			pthread_mutex_unlock(&fetch_lock);
 			play_queued_from(index);
 			break;
 		}
@@ -2015,26 +2145,37 @@ static void *worker_main(void *arg) {
 			// The podcast's list first, so the episodes after this one follow it
 			// as they would from a tap; the one episode alone when it is older
 			// than the first step of the list, or the podcast is not known.
-			int n = job.feed > 0 ? podcast_episodes(job.feed, queued_episodes, PODCAST_EPISODES_STEP) : -1;
+			//
+			// Read into a buffer of its own and copied over under the fetch
+			// thread's lock, as in run_feed_job().
+			podcast_episode_t *got = job.feed > 0 ? malloc(sizeof(*got) * PODCAST_EPISODES_STEP) : NULL;
+			int n = got ? podcast_episodes(job.feed, got, PODCAST_EPISODES_STEP) : -1;
 			int index = -1;
 			if (n > 0) {
+				bool complete = podcast_last_raw_count() < PODCAST_EPISODES_STEP;
+				pthread_mutex_lock(&fetch_lock);
+				memcpy(queued_episodes, got, sizeof(*got) * (size_t)n);
 				queued_count = n;
-				queued_complete = podcast_last_raw_count() < PODCAST_EPISODES_STEP;
+				queued_complete = complete;
+				pthread_mutex_unlock(&fetch_lock);
 				for (int i = 0; i < n && index < 0; i++) {
-					if (queued_episodes[i].id == job.id) {
+					if (got[i].id == job.id) {
 						index = i;
 					}
 				}
 			}
+			free(got);
 			if (index < 0) {
 				podcast_episode_t one;
 				if (!podcast_episode_in_feed(job.feed, job.id, &one)) {
 					snprintf(result_error, sizeof(result_error), "%s", podcast_last_error());
 					break;
 				}
+				pthread_mutex_lock(&fetch_lock);
 				queued_episodes[0] = one;
 				queued_count = 1;
 				queued_complete = true;
+				pthread_mutex_unlock(&fetch_lock);
 				index = 0;
 			}
 			play_queued_from(index);
@@ -2062,8 +2203,9 @@ static void *worker_main(void *arg) {
 
 		pthread_mutex_lock(&job_lock);
 		result_pending = true;
+		worker_on_list = false;
 		pthread_mutex_unlock(&job_lock);
-		gui_post(job_done_cb, NULL);
+		post_result(job_done_cb);
 	}
 	return NULL;
 }
@@ -2838,6 +2980,27 @@ static void listen_action_cb(lv_event_t *e) {
 	continue_play(&row->state);
 }
 
+// A long press on a row: its whole title, which the row cuts at its width, and
+// the podcast it is from.
+static void listen_long_cb(lv_event_t *e) {
+	if (switcher_back_drag_active() || player_sheet_drag_active()) {
+		return;
+	}
+	listen_row_t *row = lv_event_get_user_data(e);
+	if (!row->state.title[0]) {
+		return;
+	}
+	// The lift that ends this press would otherwise arrive as a click and start
+	// the episode.
+	lv_indev_t *indev = lv_indev_active();
+	if (indev) {
+		lv_indev_wait_release(indev);
+	}
+	char text[2 * PODCAST_TITLE_MAX + 8];
+	snprintf(text, sizeof(text), "%s%s%s", row->state.title, row->state.show[0] ? "\n\n" : "", row->state.show);
+	confirm_notice("details", text);
+}
+
 static lv_obj_t *make_header(lv_obj_t *parent, const char *text) {
 	lv_obj_t *label = lv_label_create(parent);
 	lv_label_set_text(label, tr(text));
@@ -2862,6 +3025,7 @@ static void build_listen_row(listen_row_t *row, lv_obj_t *parent) {
 	lv_obj_set_flex_align(row->button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 	lv_obj_set_event_bubble(row->button, true);
 	lv_obj_add_event_cb(row->button, listen_row_cb, LV_EVENT_CLICKED, row);
+	lv_obj_add_event_cb(row->button, listen_long_cb, LV_EVENT_LONG_PRESSED, row);
 
 	row->thumb = lv_image_create(row->button);
 	lv_obj_set_size(row->thumb, ROW_THUMB, ROW_THUMB);
@@ -3264,7 +3428,7 @@ static void build_search_page(gui_config_t *cfg) {
 // rewriting them under it is the one way to get this wrong.
 static bool show_followed_now(void) {
 	pthread_mutex_lock(&job_lock);
-	bool busy = have_pending || result_pending;
+	bool busy = have_pending || result_pending || worker_on_list;
 	pthread_mutex_unlock(&job_lock);
 	if (busy || inflight_valid) {
 		return false;
@@ -3290,7 +3454,7 @@ static bool show_followed_now(void) {
 // now, with nothing to wait for.
 static bool show_card_now(void) {
 	pthread_mutex_lock(&job_lock);
-	bool busy = have_pending || result_pending;
+	bool busy = have_pending || result_pending || worker_on_list;
 	pthread_mutex_unlock(&job_lock);
 	if (busy || inflight_valid) {
 		return false;
@@ -3841,7 +4005,7 @@ static void backfill_finished_cb(void *user) {
 		return;
 	}
 	pthread_mutex_lock(&job_lock);
-	bool busy = have_pending || result_pending;
+	bool busy = have_pending || result_pending || worker_on_list;
 	pthread_mutex_unlock(&job_lock);
 	if (busy || inflight_valid) {
 		return;

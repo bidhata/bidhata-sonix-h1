@@ -457,6 +457,7 @@ typedef struct {
 	lv_obj_t *empty_label;
 	lv_obj_t *corner_btn;
 	lv_obj_t *corner_icon; // sort on the card, follow on the catalogue
+	lv_obj_t *more_btn;	   // beside it: what is done to the whole podcast
 	// Choosing several episodes: a long press on a row starts it, a tap then
 	// chooses a row or lets it go, and letting go of the last one ends it. The
 	// round button in the corner of the screen acts on them -- delete on the
@@ -814,9 +815,11 @@ static void titles_start(void) {
 		titles_job_free(job);
 		return;
 	}
-	// A reader still at work on an older list notices the generation has moved
-	// and stops at its next file.
+	// One reader at a time: the generation moves here, so a reader still at
+	// work -- on an older list, or on this same one from the filter tapped a
+	// moment ago -- notices and stops at its next file.
 	pthread_mutex_lock(&titles_lock);
+	titles_generation++;
 	job->generation = titles_generation;
 	pthread_mutex_unlock(&titles_lock);
 	// The order shown, so the rows on screen get their titles first.
@@ -1361,12 +1364,25 @@ static void resume_cb(lv_event_t *e) {
 // an episode's menu
 // ---------------------------------------------------------------------------
 
+// The episode the menu was opened on, by what it is: its file on the card, its
+// id in the catalogue. Not by its place in the list: the list is drawn again
+// under an open menu or question whenever the player moves an episode on, and a
+// row number taken before that names another episode after it.
+static char menu_path[900];
+static long long menu_id;
+
 static episode_t *menu_episode(void) {
 	page_t *p = menu_page;
-	if (!p || p->menu_shown < 0 || p->menu_shown >= p->shown_count) {
+	if (!p || p->menu_shown < 0) {
 		return NULL;
 	}
-	return &p->episodes[p->shown[p->menu_shown]];
+	for (int i = 0; i < p->count; i++) {
+		episode_t *e = &p->episodes[i];
+		if (p->feed ? (menu_id > 0 && e->id == menu_id) : (menu_path[0] && e->path && strcmp(e->path, menu_path) == 0)) {
+			return e;
+		}
+	}
+	return NULL;
 }
 
 static void mark_cb(void *user) {
@@ -1486,37 +1502,60 @@ static void delete_cb(void *user) {
 	confirm_show("podcast_delete_from_card", e->title, "delete", delete_confirmed, NULL);
 }
 
-static void open_menu(page_t *p, lv_obj_t *anchor, int index) {
-	menu_page = p;
-	p->menu_shown = index;
+// The whole title, which the row cuts at its width, with the line under it.
+static void details_cb(void *user) {
+	(void)user;
 	episode_t *e = menu_episode();
 	if (!e) {
 		return;
 	}
+	char detail[160];
+	episode_detail(e, detail, sizeof(detail));
+	char text[PODCAST_TITLE_MAX + 170];
+	pthread_mutex_lock(&titles_lock);
+	snprintf(text, sizeof(text), "%s\n\n%s", episode_title(menu_page, e), detail);
+	pthread_mutex_unlock(&titles_lock);
+	confirm_notice("details", text);
+}
+
+static void open_menu(page_t *p, lv_obj_t *anchor, int index) {
+	menu_page = p;
+	p->menu_shown = -1;
+	if (index < 0 || index >= p->shown_count) {
+		return;
+	}
+	episode_t *e = &p->episodes[p->shown[index]];
+	p->menu_shown = index;
+	menu_id = e->id;
+	snprintf(menu_path, sizeof(menu_path), "%s", e->path ? e->path : "");
 	// Separate tables for the two states rather than a label chosen with a
 	// ternary: the string collector reads initialisers.
 	static const popover_item_t CARD_UNHEARD[] = {
 		{"podcast_mark_heard", mark_cb, (void *)1},
 		{"podcast_play_next", play_next_cb, NULL},
 		{"podcast_delete_from_card_short", delete_cb, NULL},
+		{"details", details_cb, NULL},
 	};
 	static const popover_item_t CARD_HEARD[] = {
 		{"podcast_mark_unheard", mark_cb, NULL},
 		{"podcast_play_next", play_next_cb, NULL},
 		{"podcast_delete_from_card_short", delete_cb, NULL},
+		{"details", details_cb, NULL},
 	};
 	static const popover_item_t FEED_UNHEARD[] = {
 		{"podcast_mark_heard", mark_cb, (void *)1},
 		{"podcast_play_next", play_next_cb, NULL},
 		{"podcast_download", download_cb, NULL},
+		{"details", details_cb, NULL},
 	};
 	static const popover_item_t FEED_HEARD[] = {
 		{"podcast_mark_unheard", mark_cb, NULL},
 		{"podcast_play_next", play_next_cb, NULL},
 		{"podcast_download", download_cb, NULL},
+		{"details", details_cb, NULL},
 	};
 	const popover_item_t *items = p->feed ? (e->played ? FEED_HEARD : FEED_UNHEARD) : (e->played ? CARD_HEARD : CARD_UNHEARD);
-	popover_show(anchor, items, 3);
+	popover_show(anchor, items, 4);
 }
 
 static void row_menu_cb(lv_event_t *e) {
@@ -1536,6 +1575,7 @@ static void row_menu_cb(lv_event_t *e) {
 
 static void selection_show(page_t *p) {
 	lv_obj_set_hidden(p->corner_btn, p->selecting);
+	lv_obj_set_hidden(p->more_btn, p->selecting);
 	lv_obj_set_hidden(p->sel_close_btn, !p->selecting);
 	lv_obj_set_hidden(p->sel_action_btn, !p->selecting);
 	if (p->selecting) {
@@ -2050,6 +2090,147 @@ static void states_watch_cb(lv_timer_t *timer) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// every episode of the podcast heard, or not heard
+// ---------------------------------------------------------------------------
+
+// The page whose three dots were tapped.
+static page_t *more_page;
+
+typedef struct {
+	long long feed_id; // 0 for a podcast on the card
+	char show[PODCAST_TITLE_MAX];
+	char image[PODCAST_URL_MAX];
+	podcaststate_mark_t *episodes;
+	int count;
+	bool played;
+} mark_all_job_t;
+
+static void mark_all_job_free(mark_all_job_t *job) {
+	for (int i = 0; i < job->count; i++) {
+		free(job->episodes[i].path);
+	}
+	free(job->episodes);
+	free(job);
+}
+
+static void mark_all_done_cb(void *user) {
+	(void)user;
+	lv_obj_t *active = lv_screen_active();
+	page_t *p = active == podcastcard_screen ? &card_page : active == podcastcard_feed_screen ? &feed_page : NULL;
+	if (p && p->count > 0) {
+		states_refresh(p);
+	}
+	toast_success(tr("done"));
+}
+
+// The writing is done here and not on the interface's thread: a podcast of
+// some hundreds of episodes is that many rows, and on the card a file with no
+// row yet has its tags read first.
+static void *mark_all_main(void *arg) {
+	mark_all_job_t *job = arg;
+	thread_be_background("podcast mark all");
+	podcaststate_set_played_many(job->feed_id, job->show, job->image, job->episodes, job->count, job->played);
+	mark_all_job_free(job);
+	// Not delivered, the page still draws the states again within a second:
+	// states_watch_cb() sees the revision move.
+	gui_post(mark_all_done_cb, NULL);
+	return NULL;
+}
+
+static void mark_all_confirmed(void *user) {
+	page_t *p = more_page;
+	bool heard_now = user != NULL;
+	if (!p || lv_screen_active() != p->screen) {
+		return;
+	}
+	mark_all_job_t *job = calloc(1, sizeof(*job));
+	if (job) {
+		job->episodes = calloc((size_t)(p->count > 0 ? p->count : 1), sizeof(*job->episodes));
+	}
+	if (!job || !job->episodes) {
+		free(job);
+		return;
+	}
+	job->played = heard_now;
+	if (p->feed) {
+		job->feed_id = open_feed.id;
+		snprintf(job->show, sizeof(job->show), "%s", open_feed.title);
+		snprintf(job->image, sizeof(job->image), "%s", open_feed.image);
+	}
+	for (int i = 0; i < p->count; i++) {
+		const episode_t *e = &p->episodes[i];
+		podcaststate_mark_t *m = &job->episodes[job->count];
+		if (p->feed) {
+			// The rows the podcast has are marked by its id, also those of
+			// episodes the list has not reached. An episode of the list may have
+			// no row, and only being heard gives it one.
+			const podcast_episode_t *item = podcastpage_feed_episode(e->item);
+			if (!heard_now || e->played || !item) {
+				continue;
+			}
+			m->episode_id = item->id;
+			snprintf(m->title, sizeof(m->title), "%s", item->title);
+			m->duration = e->duration;
+		} else {
+			if (e->played == heard_now || !e->path) {
+				continue;
+			}
+			m->path = strdup(e->path);
+			if (!m->path) {
+				continue;
+			}
+		}
+		job->count++;
+	}
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, mark_all_main, job) == 0) {
+		pthread_detach(thread);
+	} else {
+		mark_all_job_free(job);
+		toast_error(tr("card_write_failed"));
+	}
+}
+
+static void mark_all_cb(void *user) {
+	page_t *p = more_page;
+	if (!p) {
+		return;
+	}
+	// How many it is about. Of the catalogue, the episodes the list has reached
+	// so far.
+	char message[96] = "";
+	if (p->count == 1) {
+		snprintf(message, sizeof(message), "%s", tr("podcast_one_episode"));
+	} else if (p->count > 1) {
+		snprintf(message, sizeof(message), tr("podcast_episodes_2"), p->count);
+	}
+	if (user) {
+		confirm_show("podcast_mark_all_heard", message, NULL, mark_all_confirmed, user);
+	} else {
+		confirm_show("podcast_mark_all_unheard", message, NULL, mark_all_confirmed, user);
+	}
+}
+
+static void more_cb(lv_event_t *e) {
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	page_t *p = lv_event_get_user_data(e);
+	more_page = p;
+	// On the card only what would change something. The catalogue's list is not
+	// all of the podcast, so there both are offered.
+	popover_item_t items[2];
+	int n = 0;
+	if (p->feed || count_heard(p, false) > 0) {
+		items[n++] = (popover_item_t){"podcast_mark_all_heard", mark_all_cb, (void *)1};
+	}
+	if (p->feed || count_heard(p, true) > 0) {
+		items[n++] = (popover_item_t){"podcast_mark_all_unheard", mark_all_cb, NULL};
+	}
+	popover_show(lv_event_get_current_target(e), items, n);
+}
+
 static void card_loaded_cb(lv_event_t *e) {
 	(void)e;
 	page_t *p = &card_page;
@@ -2117,7 +2298,7 @@ static void build_page(page_t *p, gui_config_t *cfg) {
 	p->screen = lv_obj_create(NULL);
 	lv_obj_add_style(p->screen, &theme_style_screen, 0);
 	p->page_title = settingsrow_title(p->screen, cfg, "podcasts");
-	settingsrow_title_corner_slots(p->page_title, cfg, 1);
+	settingsrow_title_corner_slots(p->page_title, cfg, 2);
 	p->menu_shown = -1;
 
 	// Sort on the card; follow on the catalogue.
@@ -2134,6 +2315,21 @@ static void build_page(page_t *p, gui_config_t *cfg) {
 	lv_image_set_src(p->corner_icon, p->feed ? &icon_star : &icon_sort_date_new);
 	lv_obj_add_style(p->corner_icon, &theme_style_icon, 0);
 	lv_obj_center(p->corner_icon);
+
+	// Beside it, the three dots: every episode heard, or not heard.
+	p->more_btn = lv_btn_create(p->screen);
+	lv_obj_set_size(p->more_btn, 56, 56);
+	lv_obj_set_style_bg_opa(p->more_btn, LV_OPA_TRANSP, 0);
+	lv_obj_set_style_border_width(p->more_btn, 0, 0);
+	lv_obj_set_style_shadow_width(p->more_btn, 0, 0);
+	lv_obj_set_style_pad_all(p->more_btn, 0, 0);
+	lv_obj_align(p->more_btn, LV_ALIGN_TOP_RIGHT, -cfg->padding - (56 + 6), cfg->padding + cfg->top_bar_height);
+	lv_obj_add_event_cb(p->more_btn, more_cb, LV_EVENT_CLICKED, p);
+	lv_obj_t *more_icon = lv_image_create(p->more_btn);
+	lv_image_set_src(more_icon, &icon_ellipsis_vertical);
+	lv_obj_add_style(more_icon, &theme_style_icon, 0);
+	lv_obj_set_style_image_recolor_opa(more_icon, LV_OPA_COVER, 0);
+	lv_obj_center(more_icon);
 
 	// In the same place while choosing: the cross that ends it.
 	p->sel_close_btn = lv_btn_create(p->screen);

@@ -281,11 +281,28 @@ int speed_pull(speed_t *s, short *out, int want, int (*fill)(void *user, short *
 	// At 1.0 there is nothing to do, and doing nothing must also mean no
 	// buffering: an untouched track should not gain a window of latency.
 	if (s->factor > 0.999 && s->factor < 1.001 && s->output_read >= s->output_frames) {
-		int got = fill(user, out, want);
-		if (input_frames) {
-			*input_frames = (uint64_t)(got > 0 ? got : 0);
+		// What the stretcher had already pulled in while it was working goes
+		// out first, as it is: it comes before anything the source has left,
+		// and kept back it would be played, stale, the next time the factor
+		// moves away from 1.0.
+		int held = 0;
+		if (s->input_frames > 0) {
+			held = s->input_frames < want ? s->input_frames : want;
+			memcpy(out, s->input, (size_t)held * s->channels * sizeof(short));
+			memmove(s->input, s->input + (size_t)held * s->channels,
+					(size_t)(s->input_frames - held) * s->channels * sizeof(short));
+			s->input_frames -= held;
+			s->skip_fraction = 0;
+			s->primed = false; // `mid` belongs to a place the stream has left
 		}
-		return got > 0 ? got : 0;
+		int got = held < want ? fill(user, out + (size_t)held * s->channels, want - held) : 0;
+		if (got < 0) {
+			got = 0;
+		}
+		if (input_frames) {
+			*input_frames = (uint64_t)(held + got);
+		}
+		return held + got;
 	}
 
 	int written = 0;

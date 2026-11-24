@@ -388,6 +388,12 @@ static bool read_id3v2_whole(FILE *f, const uint8_t *header, albumart_t *out) {
 	if (tag_flags & 0x40) {
 		if (major >= 3 && pos + 4 <= tag_size) {
 			uint32_t ext_size = (major >= 4) ? syncsafe32(tag + pos) : be32(tag + pos);
+			// A length that does not fit in the tag would carry `pos` past its
+			// end, and on a 32-bit size_t round to before its start.
+			if (ext_size > tag_size - pos - 4) {
+				free(tag);
+				return false;
+			}
 			pos += (major >= 4) ? ext_size : ext_size + 4;
 		}
 	}

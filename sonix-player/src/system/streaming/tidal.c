@@ -500,7 +500,8 @@ static bool token_refresh(void) {
 		// valid (password changed, access revoked from the phone, application
 		// keys replaced). Keeping a dead refresh token means retrying on every
 		// request forever; better to say plainly that signing in again is needed.
-		if (status >= 400 && status < 500) {
+		// 408 and 429 are the server asking to be asked again, not a refusal.
+		if (status >= 400 && status < 500 && status != 408 && status != 429) {
 			printf("tidal: the refresh was refused, session closed\n");
 			tidal_logout();
 		}
@@ -1795,16 +1796,42 @@ bool tidal_playlist_create(const char *name, char *out_id, size_t out_size) {
 		return false;
 	}
 
+	// A 401 means the token died before it said it would: renewed once and the
+	// request made again, as api_write() does.
+	if (status == 401) {
+		free(body);
+		body = NULL;
+		if (!token_refresh()) {
+			if (!last_error[0]) {
+				set_error("%s", tr("tidal_session_expired"));
+			}
+			return false;
+		}
+		build_headers(headers, sizeof(headers));
+		if (!http_request(url, &req, &body, NULL, TIDAL_BODY_LIMIT, TIDAL_TIMEOUT_SECS, &status)) {
+			const char *why = http_last_error();
+			set_error("%s", why && why[0] ? why : tr("tidal_no_reply"));
+			return false;
+		}
+	}
+
+	// A refusal can come with no body at all, so the status is read first.
+	if (status < 200 || status >= 300) {
+		json_doc_t refusal;
+		if (body && body[0] && json_parse(body, &refusal)) {
+			note_api_error(&refusal, status);
+			json_free(&refusal);
+		} else {
+			set_error(tr("tidal_answered_with"), status);
+		}
+		free(body);
+		return false;
+	}
+
 	json_doc_t doc;
 	if (!json_parse(body, &doc)) {
 		free(body);
 		set_error("%s", tr("tidal_unreadable_tidal_reply"));
-		return false;
-	}
-
-	if (status < 200 || status >= 300) {
-		note_api_error(&doc, status);
-		api_done(body, &doc);
 		return false;
 	}
 
@@ -1878,6 +1905,29 @@ bool tidal_playlist_add_track(const char *playlist_id, long track_id) {
 		const char *why = http_last_error();
 		set_error("%s", why && why[0] ? why : tr("tidal_no_reply"));
 		return false;
+	}
+
+	// A 401 means the token died before it said it would: renewed once and the
+	// request made again, as api_write() does.
+	if (status == 401) {
+		free(body);
+		body = NULL;
+		if (!token_refresh()) {
+			if (!last_error[0]) {
+				set_error("%s", tr("tidal_session_expired"));
+			}
+			return false;
+		}
+		n = snprintf(headers, sizeof(headers), "Authorization: Bearer %s\r\nIf-None-Match: *\r\n", access_token);
+		if (n <= 0 || (size_t)n >= sizeof(headers)) {
+			set_error("%s", tr("tidal_request_failed"));
+			return false;
+		}
+		if (!http_request(url, &req, &body, NULL, TIDAL_BODY_LIMIT, TIDAL_TIMEOUT_SECS, &status)) {
+			const char *why = http_last_error();
+			set_error("%s", why && why[0] ? why : tr("tidal_no_reply"));
+			return false;
+		}
 	}
 
 	bool ok = status >= 200 && status < 300;

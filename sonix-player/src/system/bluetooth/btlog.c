@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -397,7 +398,32 @@ static monitor_filter_t monitor;
 
 static bool starts_with(const char *s, const char *prefix) { return strncmp(s, prefix, strlen(prefix)) == 0; }
 
+// Whether a decoded field is a key: "Link key: 5a 1f ...", "Long term key:",
+// "Identity resolving key:", "Key:", "Passkey:". Its name ends in "key" and the
+// value follows the colon. "Key type:" and "Key size:" do not, and stay. When
+// it is, `value_at` is where the value starts.
+static bool monitor_field_is_key(const char *line, size_t *value_at) {
+	if (line[0] != ' ') {
+		return false; // a packet header, not a field
+	}
+	const char *colon = strchr(line, ':');
+	if (!colon || colon - line < 3 || strncasecmp(colon - 3, "key", 3) != 0) {
+		return false;
+	}
+	*value_at = (size_t)(colon - line) + 1;
+	return true;
+}
+
 static void monitor_emit(const char *line) {
+	// The log is a file on the card, there to be handed to somebody else, and
+	// a link key is what lets another device pass for a paired one. The field
+	// is kept so the exchange still reads whole; its value is not.
+	char hidden[LINE_MAX_LEN + 1];
+	size_t value_at = 0;
+	if (monitor_field_is_key(line, &value_at)) {
+		snprintf(hidden, sizeof(hidden), "%.*s (not logged)", (int)value_at, line);
+		line = hidden;
+	}
 	if (monitor.skipped) {
 		char note[64];
 		snprintf(note, sizeof(note), "      (%lu data packets not shown)", monitor.skipped);

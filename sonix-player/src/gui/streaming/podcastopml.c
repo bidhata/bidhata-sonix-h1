@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/nowplaying/player.h"
@@ -776,7 +777,11 @@ static void *export_lookup_main(void *arg) {
 	}
 	free(ids);
 	// After the addresses: the posts are taken in the order they were made.
-	gui_post(export_done_cb, NULL);
+	// Tried again while the queue is full: this is the post that takes the busy
+	// notice down and lets the next export start.
+	for (int tries = 0; tries < 100 && !gui_post(export_done_cb, NULL); tries++) {
+		usleep(50 * 1000);
+	}
 	return NULL;
 }
 

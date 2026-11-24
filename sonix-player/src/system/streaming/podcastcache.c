@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -757,6 +758,13 @@ static bool download_pump(download_t *d, long until, bool *finished) {
 		d->done += n;
 		growfile_progress(d->path, d->done);
 
+		// A server that states no length can still send more than the counter
+		// holds.
+		if (d->done > LONG_MAX - FETCH_CHUNK) {
+			fprintf(stderr, "podcastcache: %lld is too large to download\n", d->episode_id);
+			return false;
+		}
+
 		if (until == 0 && *finished) {
 			break;
 		}
@@ -833,6 +841,15 @@ bool podcastcache_start(long long episode_id, const char *url, const char *mime,
 	// received a user command, which is the page: see streamturn_abandon_all().
 	busy_acquire();
 
+	// Asked again now that the turn is here: another caller may have downloaded
+	// this very episode during the wait, and opening the file for writing would
+	// truncate it under whoever is playing it.
+	if (podcastcache_has(episode_id, mime, out, size)) {
+		busy_release();
+		free(d);
+		return true;
+	}
+
 	// The generation is taken AFTER the wait: a value read before it would be
 	// stale by the time the turn arrives, and an episode change that happened
 	// during the wait would cancel this download the moment it starts.
@@ -858,6 +875,19 @@ bool podcastcache_start(long long episode_id, const char *url, const char *mime,
 		fprintf(stderr, "podcastcache: %lld does not open%s%s\n", episode_id, why && why[0] ? ": " : "",
 				why && why[0] ? why : "");
 		set_error(why && why[0] ? why : tr("podcast_cannot_reach_the_podcast_server"));
+		clear_active(d->episode_id);
+		busy_release();
+		free(d);
+		return false;
+	}
+
+	// The length is a long, 32 bits on the player, and one that does not fit
+	// comes back saturated: the byte counters here could not follow such a
+	// file, so it is refused before anything is written.
+	if (d->stream.content_length >= LONG_MAX) {
+		fprintf(stderr, "podcastcache: %lld is too large to download\n", episode_id);
+		set_error(tr("download_failed"));
+		http_stream_close(&d->stream);
 		clear_active(d->episode_id);
 		busy_release();
 		free(d);

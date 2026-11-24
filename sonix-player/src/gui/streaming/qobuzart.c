@@ -331,6 +331,13 @@ bool qobuzart_take(const void *owner, int slot_index, cover_image_t *out, bool *
 	return found;
 }
 
+bool qobuzart_owns(const void *owner) {
+	pthread_mutex_lock(&lock);
+	bool mine = pool_owner == owner;
+	pthread_mutex_unlock(&lock);
+	return mine;
+}
+
 void qobuzart_clear(void) {
 	pthread_mutex_lock(&lock);
 	char dir[512];

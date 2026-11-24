@@ -325,7 +325,7 @@ static lv_obj_t *make_card(lv_obj_t *parent, const char *name, lv_obj_t **value_
 // Every stepped slider this file has built, so a theme change can repaint
 // their knob rings: the ring colour depends on the theme, and these pages are
 // built once at startup.
-#define SETTINGSROW_MAX_SLIDERS 16
+#define SETTINGSROW_MAX_SLIDERS 48
 static lv_obj_t *built_sliders[SETTINGSROW_MAX_SLIDERS];
 static int built_slider_count;
 
@@ -367,6 +367,10 @@ static lv_obj_t *make_slider(lv_obj_t *card, int steps, lv_event_cb_t cb) {
 			theme_register_refresh(settingsrow_refresh_theme);
 		}
 		built_sliders[built_slider_count++] = slider;
+	} else {
+		// Not silent: what it costs is a knob ring that keeps the theme the
+		// slider was built under.
+		fprintf(stderr, "settingsrow: no room for another slider (the list holds %d)\n", SETTINGSROW_MAX_SLIDERS);
 	}
 	lv_obj_set_style_pad_all(slider, 8, LV_PART_KNOB);
 	lv_obj_set_style_shadow_width(slider, 8, LV_PART_KNOB);
@@ -630,11 +634,18 @@ static void row_clicked_cb(lv_event_t *e) {
 		return; // a swipe across the row, not a tap on it
 	}
 	// Swap in the caller's user data so the wrapped callback sees what it was
-	// registered with, then restore it for the next event.
+	// registered with, then restore it for the next event. The callback may
+	// delete the row, and the record with it: nothing is read from it after
+	// the call.
+	lv_event_cb_t cb = action->cb;
 	e->user_data = action->user_data;
-	action->cb(e);
+	cb(e);
 	e->user_data = action;
 }
+
+// The record goes with its row: lists that are cleaned and filled again make
+// a new one for every row, every time.
+static void row_deleted_cb(lv_event_t *e) { free(lv_event_get_user_data(e)); }
 
 // A row's chevron, if it has one: the only image among its children.
 static lv_obj_t *row_chevron(lv_obj_t *row) {
@@ -707,12 +718,13 @@ lv_obj_t *settingsrow_add(lv_obj_t *parent, const char *name, lv_obj_t **value_o
 	// on a row and not only in the gaps between rows.
 	lv_obj_set_event_bubble(row, true);
 
-	// Rows live for the whole run, so these action records are never freed.
+	// One action record per row, freed when the row is deleted.
 	row_action_t *action = malloc(sizeof(*action));
 	if (action) {
 		action->cb = cb;
 		action->user_data = user_data;
 		lv_obj_add_event_cb(row, row_clicked_cb, LV_EVENT_CLICKED, action);
+		lv_obj_add_event_cb(row, row_deleted_cb, LV_EVENT_DELETE, action);
 	}
 
 	lv_obj_t *label = lv_label_create(row);

@@ -9,6 +9,10 @@ extern lv_obj_t *settings_screen;
 
 void settings_init(gui_config_t *cfg);
 
+// What [power] screen_off_seconds counts as while nothing is saved under it,
+// in seconds. For every reader of the key, so they agree.
+#define SETTINGS_SCREEN_OFF_DEFAULT_SECONDS 30
+
 // Hands power.c the screen timeout as it was last left ([power]
 // screen_off_seconds). Call once at startup, after power_init(); the Screen
 // page calls it again whenever the slider moves.

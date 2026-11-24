@@ -1758,7 +1758,8 @@ static void filters_rebuild(int rate) {
 		slot_update(slot, type, freq, gain, (double)b->q_cent / 100.0, rate, rate_changed);
 		if (chain_active[slot]) {
 			active++;
-			if (gain > max_boost) {
+			// A low-pass or high-pass keeps a gain value it does not apply.
+			if (filter_uses_gain(type) && gain > max_boost) {
 				max_boost = gain;
 			}
 		}

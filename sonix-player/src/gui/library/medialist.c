@@ -132,6 +132,16 @@ lv_obj_t *medialist_albums_screen;
 #define TINT_DARK_MIN 28
 #define TINT_DARK_MAX 90
 #define TINT_SAT_MAX 176 // the most saturation a page keeps, out of 256
+// A long press on a row whose title is cut makes that one title travel past,
+// this many times and at this pace, and then stand cut again.
+#define TITLE_SCROLL_PASSES 2
+#define TITLE_SCROLL_PX_S 55
+#define TITLE_SCROLL_DELAY_MS 400  // before the first pass
+#define TITLE_SCROLL_PAUSE_MS 1500 // between two passes
+// The blanks LVGL leaves between the end of the text and its return
+// (LV_LABEL_WAIT_CHAR_COUNT, which is not in a public header).
+#define TITLE_SCROLL_WAIT_CHARS 3
+
 // The track number that takes the place of the cover on each row of that
 // layout: one picture at the top says whose record it is, and the twelve
 // beneath it would only say it again.
@@ -178,6 +188,7 @@ typedef struct {
 	char name[256];
 	char path[512];
 	char artist[128]; // a track's artist, an album's; empty on the other lists
+	int length_ms;	  // how long a track plays; 0 when the index does not say, and on the other lists
 	bool has_path;
 } winrow_t;
 
@@ -190,6 +201,7 @@ typedef struct {
 	lv_obj_t *detail;	// the line under the title: the badge and the artist
 	lv_obj_t *quality;	// ...the badge, on track rows; NULL elsewhere
 	lv_obj_t *artist;	// ...and the artist, where "Show artist" asks for it
+	lv_obj_t *length;	// how long the track plays, right of the title; NULL on name lists
 	lv_obj_t *menu_btn; // the ellipsis on track rows; NULL on name lists
 	lv_obj_t *chevron;	// the chevron on name rows; NULL on track rows
 	lv_obj_t *check;	// the tick on a chosen row in selection mode
@@ -607,7 +619,7 @@ typedef struct {
 	int filled;
 } window_fill_t;
 
-static bool window_fill_cb(const char *name, const char *path, const char *artist, void *user) {
+static bool window_fill_cb(const char *name, const char *path, const char *artist, int length_ms, void *user) {
 	window_fill_t *fill = user;
 	if (fill->filled >= WINDOW_ROWS) {
 		return false;
@@ -617,6 +629,7 @@ static bool window_fill_cb(const char *name, const char *path, const char *artis
 	row->has_path = path != NULL;
 	snprintf(row->path, sizeof(row->path), "%s", path ? path : "");
 	snprintf(row->artist, sizeof(row->artist), "%s", artist ? artist : "");
+	row->length_ms = length_ms;
 	return true;
 }
 
@@ -688,7 +701,7 @@ static bool window_cover(panel_t *p, int index) {
 	}
 
 	window_fill_t fill = {.panel = p, .filled = 0};
-	library_index_window(p->ix, first, WINDOW_ROWS, window_fill_cb, &fill);
+	library_index_window_timed(p->ix, first, WINDOW_ROWS, window_fill_cb, &fill);
 	p->window_first = first;
 	p->window_count = fill.filled;
 	return index >= first && index < first + fill.filled;
@@ -730,6 +743,27 @@ static const char *row_artist_at(panel_t *p, int index) {
 	}
 	const char *artist = p->window[index - p->window_first].artist;
 	return artist[0] ? artist : NULL;
+}
+
+// How long the track of a row plays, in milliseconds, or 0: the index does not
+// say, the row is not a track, or the list is one of paths handed in.
+static int row_length_at(panel_t *p, int index) {
+	if (p->from_paths || index < 0 || index >= p->count || !window_cover(p, index)) {
+		return 0;
+	}
+	return p->window[index - p->window_first].length_ms;
+}
+
+// A length as a clock reads it, to the nearest second. `padded` writes the
+// leading figure with two digits whatever it is.
+static void length_text(long long ms, bool padded, char *out, size_t size) {
+	long seconds = (long)((ms + 500) / 1000);
+	if (seconds >= 3600) {
+		snprintf(out, size, padded ? "%02ld:%02ld:%02ld" : "%ld:%02ld:%02ld", seconds / 3600, (seconds / 60) % 60,
+				 seconds % 60);
+	} else {
+		snprintf(out, size, padded ? "%02ld:%02ld" : "%ld:%02ld", seconds / 60, seconds % 60);
+	}
 }
 
 // The same, copied out, for a caller that has to keep it across another read.
@@ -1126,6 +1160,20 @@ static void row_update_detail(panel_t *p, row_t *row, int index, const char *pat
 		lv_obj_set_hidden(row->artist, true);
 	}
 
+	// The length, when the index has it. A row without one has no label at
+	// all in its layout, so its title keeps the whole width.
+	if (row->length) {
+		int length_ms = row_length_at(p, index);
+		if (length_ms > 0) {
+			char text[16];
+			length_text(length_ms, false, text, sizeof(text));
+			lv_label_set_text(row->length, text);
+			lv_obj_set_hidden(row->length, false);
+		} else {
+			lv_obj_set_hidden(row->length, true);
+		}
+	}
+
 	bool badge = row->quality && !lv_obj_is_hidden(row->quality);
 	if (badge || artist) {
 		lv_obj_set_hidden(row->detail, false);
@@ -1370,12 +1418,67 @@ static row_t *row_of_button(panel_t *p, lv_obj_t *button) {
 	return NULL;
 }
 
+// ---------------------------------------------------------------------------
+// A title too long for its row
+//
+// A row's title is one line, cut with dots. A long press on the row sends that
+// one title past in full: the label is switched to LVGL's circular scroll for
+// TITLE_SCROLL_PASSES passes and back to dots when they are done. Only a title
+// that is cut moves, only the row that was pressed, and the animation ends by
+// itself, so a list never holds one that runs with nobody looking.
+// ---------------------------------------------------------------------------
+
+// What every row's title takes its scroll's timing from. The label's style
+// keeps the pointer, so there is one and it is never freed.
+static lv_anim_t title_scroll_template;
+
+// The last pass is over: the title stands cut with dots again. LVGL has taken
+// the animation off its list before calling this.
+static void title_scroll_done_cb(lv_anim_t *a) { lv_label_set_long_mode(a->var, LV_LABEL_LONG_DOT); }
+
+static void title_scroll_init(void) {
+	if (title_scroll_template.completed_cb) {
+		return;
+	}
+	lv_anim_init(&title_scroll_template);
+	lv_anim_set_delay(&title_scroll_template, TITLE_SCROLL_DELAY_MS);
+	lv_anim_set_repeat_delay(&title_scroll_template, TITLE_SCROLL_PAUSE_MS);
+	lv_anim_set_repeat_count(&title_scroll_template, TITLE_SCROLL_PASSES);
+	lv_anim_set_completed_cb(&title_scroll_template, title_scroll_done_cb);
+}
+
+// Sends the row's title past when it does not fit. False when it fits, and
+// nothing was done.
+static bool row_title_scroll(panel_t *p, row_t *row) {
+	const char *name = NULL, *path = NULL;
+	if (!row_at(p, row->index, &name, &path) || !name) {
+		return false;
+	}
+	// Measured from the list's own text and not the label's: a cut label
+	// holds its text with the dots written into it.
+	char shown[sizeof(((winrow_t *)0)->name)];
+	library_album_title(name, shown, sizeof(shown));
+	const lv_font_t *font = lv_obj_get_style_text_font(row->label, LV_PART_MAIN);
+	lv_point_t size;
+	lv_text_get_size(&size, shown, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+	if (size.x <= lv_obj_get_content_width(row->label)) {
+		return false;
+	}
+
+	// LVGL takes the time of one pass, not a speed: the time is worked out
+	// from the distance, so a long title goes past no faster than a short one.
+	int32_t distance = size.x + lv_font_get_glyph_width(font, ' ', ' ') * TITLE_SCROLL_WAIT_CHARS;
+	lv_obj_set_style_anim_duration(row->label, (uint32_t)(((int64_t)distance * 1000) / TITLE_SCROLL_PX_S), 0);
+	lv_label_set_long_mode(row->label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+	return true;
+}
+
 static void row_long_pressed_cb(lv_event_t *e) {
 	if (player_sheet_drag_active() || switcher_back_drag_active()) {
 		return;
 	}
 	panel_t *p = lv_event_get_user_data(e);
-	if (!panel_selectable(p) || p->reordering) {
+	if (p->reordering) {
 		return;
 	}
 	row_t *row = row_of_button(p, lv_event_get_current_target(e));
@@ -1383,9 +1486,21 @@ static void row_long_pressed_cb(lv_event_t *e) {
 		return;
 	}
 
+	// On every list, the ones whose rows cannot be chosen included: there the
+	// long press does this and nothing else.
+	bool scrolling = row_title_scroll(p, row);
+	lv_indev_t *indev = lv_indev_active();
+	if (!panel_selectable(p)) {
+		// The lift that ends this press would otherwise arrive as a click and
+		// open the row whose name was only being read.
+		if (scrolling && indev) {
+			lv_indev_wait_release(indev);
+		}
+		return;
+	}
+
 	// The lift that ends this press would otherwise arrive as a click and
 	// take the row straight back out of the selection.
-	lv_indev_t *indev = lv_indev_active();
 	if (indev) {
 		lv_indev_wait_release(indev);
 	}
@@ -1782,6 +1897,11 @@ static void row_bind(panel_t *p, row_t *row, int index) {
 	// only the name is for reading.
 	char shown[sizeof(((winrow_t *)0)->name)];
 	library_album_title(name, shown, sizeof(shown));
+	// A title still travelling (row_title_scroll) belongs to the row that was
+	// here before.
+	if (lv_label_get_long_mode(row->label) != LV_LABEL_LONG_DOT) {
+		lv_label_set_long_mode(row->label, LV_LABEL_LONG_DOT);
+	}
 	lv_label_set_text(row->label, shown);
 	// Decided here and not at construction, because the same panel serves
 	// Artists, Albums and Genres in turn: only the bind knows which list is
@@ -3447,7 +3567,13 @@ static void menu_drop_row_if_listed(void) {
 	if (menu_panel) {
 		panel_refresh_stale(menu_panel);
 	}
-	if (menu_panel && menu_index >= 0 && menu_index < menu_panel->count) {
+	if (menu_panel && !menu_panel->from_paths) {
+		// A list read from the index has just been read again, and that leaves
+		// every pooled row waiting to be bound: this is what binds them, so the
+		// row goes from the screen and the others answer a tap. model_remove()
+		// below is for a list of paths only.
+		window_update(menu_panel);
+	} else if (menu_panel && menu_index >= 0 && menu_index < menu_panel->count) {
 		// The row may well be outside the cached band by now -- the popover
 		// survives a scroll -- so this is a read that can go to the database.
 		// Once per menu action, which is nothing.
@@ -3821,6 +3947,7 @@ static void build_panel(panel_t *p, gui_config_t *cfg, bool is_tracks, int slot_
 	lv_obj_align(p->empty, LV_ALIGN_TOP_MID, 0, 120);
 	lv_obj_set_hidden(p->empty, true);
 
+	title_scroll_init();
 	for (int i = 0; i < ROW_POOL; i++) {
 		row_t *row = &p->rows[i];
 
@@ -3879,6 +4006,8 @@ static void build_panel(panel_t *p, gui_config_t *cfg, bool is_tracks, int slot_
 		lv_obj_set_height(row->label, lv_font_get_line_height(&font_ui_24));
 		lv_obj_add_style(row->label, &theme_style_text, 0);
 		lv_obj_set_style_text_font(row->label, &font_ui_24, 0);
+		// Read only while the title scrolls, after a long press on its row.
+		lv_obj_set_style_anim(row->label, &title_scroll_template, 0);
 
 		row->detail = lv_obj_create(row->text);
 		lv_obj_remove_style_all(row->detail);
@@ -3925,6 +4054,19 @@ static void build_panel(panel_t *p, gui_config_t *cfg, bool is_tracks, int slot_
 		lv_obj_set_scrollable(row->playmark, false);
 		lv_obj_set_clickable(row->playmark, false);
 		lv_obj_set_hidden(row->playmark, true);
+
+		// How long the track plays, between the title and the ellipsis, as
+		// wide as its own figures. Hidden, and so out of the layout, on a row
+		// whose length is not known.
+		row->length = NULL;
+		if (is_tracks) {
+			row->length = lv_label_create(row->button);
+			lv_label_set_text(row->length, "");
+			lv_obj_add_style(row->length, &theme_style_text_dim, 0);
+			lv_obj_set_style_text_font(row->length, &font_ui_20, 0);
+			lv_obj_set_clickable(row->length, false);
+			lv_obj_set_hidden(row->length, true);
+		}
 
 		row->menu_btn = NULL;
 		row->chevron = NULL;
@@ -4225,6 +4367,7 @@ static void page_paint(panel_t *p) {
 		local_color(row->button, LV_STYLE_BG_COLOR, LV_STATE_PRESSED, t, p->tint_pressed);
 		local_color(row->label, LV_STYLE_TEXT_COLOR, 0, t, p->tint_ink);
 		local_color(row->artist, LV_STYLE_TEXT_COLOR, 0, t, p->tint_dim);
+		local_color(row->length, LV_STYLE_TEXT_COLOR, 0, t, p->tint_dim);
 		local_color(row->playmark, LV_STYLE_BG_COLOR, 0, t, p->tint_ink);
 		if (row->menu_btn) {
 			local_color(lv_obj_get_child(row->menu_btn, 0), LV_STYLE_IMAGE_RECOLOR, 0, t, p->tint_ink);
@@ -4416,8 +4559,8 @@ static lv_obj_t *head_play_button(lv_obj_t *parent, lv_event_cb_t cb, panel_t *p
 	return button;
 }
 
-// The head above an album's tracks: its cover, title, artist, genre and year,
-// and the three ways to start it. Built for the album being opened and thrown
+// The head above an album's tracks: its cover, title, artist, genre, year and
+// running time, and the three ways to start it. Built for the album being opened and thrown
 // away with it.
 static void head_build(panel_t *p) {
 	head_clear(p);
@@ -4473,13 +4616,24 @@ static void head_build(panel_t *p) {
 		p->head_artist = head_line(p->head, width, info.artist, &font_ui_24, 1);
 	}
 
-	char meta[200] = "";
+	char meta[240] = "";
 	if (info.genre[0] && info.year > 0) {
 		snprintf(meta, sizeof(meta), "%s \xC2\xB7 %d", info.genre, info.year);
 	} else if (info.genre[0]) {
 		snprintf(meta, sizeof(meta), "%s", info.genre);
 	} else if (info.year > 0) {
 		snprintf(meta, sizeof(meta), "%d", info.year);
+	}
+	// The record's running time at the end of the line, HH:MM:SS or MM:SS
+	// under an hour -- but only when the index has the length of every track
+	// of it: a sum with a hole in it is a wrong number.
+	long long total_ms = 0;
+	int unknown = 0;
+	if (p->ix && library_index_length(p->ix, &total_ms, &unknown) && unknown == 0 && total_ms > 0) {
+		char time[24];
+		length_text(total_ms, true, time, sizeof(time));
+		size_t used = strlen(meta);
+		snprintf(meta + used, sizeof(meta) - used, used ? " \xC2\xB7 %s" : "%s", time);
 	}
 	if (meta[0]) {
 		p->head_meta = head_line(p->head, width, meta, &font_ui_20, 1);

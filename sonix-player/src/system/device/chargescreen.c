@@ -36,6 +36,7 @@ bool chargescreen_mark(int mark) {
 #include "src/system/device/axpcharge.h"
 #include "src/system/device/bootlogo.h"
 #include "src/system/device/power.h"
+#include "src/system/device/system.h"
 
 #define AXP_REG_STATUS1 0x00
 #define AXP_STATUS1_VBUS_GOOD 0x20
@@ -815,6 +816,13 @@ void chargescreen_run_if_wanted(void) {
 		}
 
 		axpcharge_tick();
+		// The percentage limit on the MP2731, which only a driver with its own
+		// limit keeps by itself: the same decision the player's tick takes,
+		// from a level read now.
+		if (!axpcharge_applies()) {
+			sync_battery_from_sysfs();
+			power_charge_limit_tick();
+		}
 		percent = battery_percent(percent);
 		if (screen_on && percent != shown_percent) {
 			shown_percent = percent;

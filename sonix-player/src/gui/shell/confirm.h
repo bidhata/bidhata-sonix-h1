@@ -24,4 +24,8 @@ void confirm_notice(const char *title, const char *message);
 
 void confirm_close(void);
 
+// Whether a question is on screen with an answer still owed to its caller: a
+// dialog put up by confirm_show() with an action. A notice is not one.
+bool confirm_question_open(void);
+
 #endif /* CONFIRM_H */

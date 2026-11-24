@@ -723,8 +723,12 @@ static bool start_server(void) {
 	return up;
 }
 
+// What is applied is the intent as it stands once the lock is had, not the one
+// this call was made with: several calls queue up behind a slow start, in no
+// particular order, and the last to run must leave the server as last asked.
 static void apply(bool on) {
 	pthread_mutex_lock(&lock);
+	on = g_enabled;
 	if (on) {
 		start_server();
 	} else {

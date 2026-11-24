@@ -1,6 +1,7 @@
 #include "usb.h"
 
 #include "src/system/device/adb.h"
+#include "src/system/device/ota.h"
 #include "src/system/device/power.h"
 #include "src/system/device/sysinfo.h"
 
@@ -25,6 +26,8 @@
 #include "lvgl/lvgl.h"
 
 #include "src/gui/library/browser.h"
+#include "src/gui/nowplaying/cover.h"
+#include "src/system/streaming/radio.h"
 #include "src/gui/shell/gui.h"
 #include "src/system/audio/audio.h"
 #include "src/system/playback/device_state.h"
@@ -679,6 +682,24 @@ static bool host_ejected(void) {
 	return ejected;
 }
 
+// Opens again what storage_export() closed on the card, once the card is
+// mounted here: after the host let go of it, and when it was never handed over.
+static void card_stores_reopen(void) {
+	char db_path[512];
+	snprintf(db_path, sizeof(db_path), "%s/.local/library.db", sd_mount);
+	library_open(db_path);
+	snprintf(db_path, sizeof(db_path), "%s/.local/audiobooks.db", sd_mount);
+	audiobookdb_open(db_path);
+	// Only onto a card that is there: on a bare mount point these two would
+	// make their files on the internal flash.
+	if (mount_still_up()) {
+		cover_set_cache_dir(sd_mount);
+		radio_store_open(sd_mount);
+	}
+	logging_resume_after_usb();
+	btlog_card_attach(sd_mount);
+}
+
 // Hands the card to the host. Ordering is what the stock player does: stop
 // touching the filesystem, unmount, then export the raw device.
 static void storage_export(void) {
@@ -709,6 +730,10 @@ static void storage_export(void) {
 	audiobookdb_close();
 	logging_suspend_for_usb();
 	btlog_card_release();
+	// The thumbnail cache and the radio's database are open on the card for as
+	// long as the player runs: the cache moves to /tmp, the store is closed.
+	cover_set_cache_dir(NULL);
+	radio_store_close();
 
 	if (sysserver_available()) {
 		sysserver_umount(sd_mount);
@@ -721,13 +746,16 @@ static void storage_export(void) {
 
 	// Handing the raw device to a PC while the card is still mounted here would
 	// corrupt the filesystem. If the first unmount did not take (a straggler
-	// still holding a file), escalate: plain, forced, then lazy.
+	// still holding a file), try again: plain, then forced, a second apart.
+	// Never lazy: that detaches the mount point and leaves the filesystem
+	// live under whatever still holds a file, with the host writing to the
+	// same card.
 	//
 	// The loop also gives up if DAC mode takes the controller meanwhile:
 	// carrying on would insert the medium into what is by then the audio
 	// gadget, and the card would appear on the PC in DAC mode.
 	for (int attempt = 0; attempt < 3 && mount_still_up() && !dac_owns_usb; attempt++) {
-		const char *flags = (attempt == 0) ? "" : (attempt == 1) ? "-f " : "-l ";
+		const char *flags = (attempt == 0) ? "" : "-f ";
 		char cmd[512];
 		snprintf(cmd, sizeof(cmd), "umount %s%s", flags, sd_mount);
 		fprintf(stderr, "usb: card still mounted, retrying: %s\n", cmd);
@@ -741,7 +769,17 @@ static void storage_export(void) {
 		return;
 	}
 	if (mount_still_up()) {
-		fprintf(stderr, "usb: could not unmount %s; exporting anyway (read-mostly card)\n", sd_mount);
+		// Something on the player still has a file open on the card. It stays
+		// here: everything closed above is opened again, and the watcher waits
+		// for the cable to come out before it offers the card once more.
+		fprintf(stderr, "usb: could not unmount %s, something still holds a file on it; the card stays with the player\n",
+				sd_mount);
+		card_stores_reopen();
+		storage_active = false;
+		if (!suppress_popups) {
+			gui_post(popup_disconnected_cb, NULL);
+		}
+		return;
 	}
 
 	// With ADB holding the USB controller its gadget must carry the storage
@@ -844,13 +882,7 @@ static void storage_restore(void) {
 	fprintf(stderr, "usb: card remounted on %s: %s\n", sd_mount, mount_still_up() ? "yes" : "NO");
 
 	// The databases and the log live on the card that just came back.
-	char db_path[512];
-	snprintf(db_path, sizeof(db_path), "%s/.local/library.db", sd_mount);
-	library_open(db_path);
-	snprintf(db_path, sizeof(db_path), "%s/.local/audiobooks.db", sd_mount);
-	audiobookdb_open(db_path);
-	logging_resume_after_usb();
-	btlog_card_attach(sd_mount);
+	card_stores_reopen();
 
 	storage_active = false;
 
@@ -1052,8 +1084,21 @@ static void *usb_thread(void *arg) {
 			continue;
 		}
 
+		// A firmware image being downloaded is being written to the card: it
+		// is offered to the host once the download has ended.
+		if (ota_busy()) {
+			continue;
+		}
+
 		locked_export();
 		exported = storage_active;
+		// Not handed over because the card could not be unmounted: not tried
+		// again every second, each try stopping the music, but once the cable
+		// has been out. (DAC mode abandoning the export is its own case, and
+		// the loop stands down for it at the top.)
+		if (!exported && !dac_owns_usb) {
+			await_unplug = true;
+		}
 	}
 
 	return NULL;

@@ -247,6 +247,17 @@ bool audio_external_begin_latency(int sample_rate, int channels, int bits, int b
 // opening its own.
 bool audio_external_begin_yielding(int sample_rate, int channels, int bits, int buffer_ms);
 int audio_external_write(const void *frames, int count);
+
+// What has been written and not yet played, in milliseconds; -1 when there is
+// no PCM or it will not say. For the thread that writes, between writes (it
+// waits behind a write in progress).
+int audio_external_delay_ms(void);
+
+// Starts playing what has been written without waiting for the buffer to fill
+// to its start threshold. For a source that deliberately keeps less than that
+// waiting; harmless on a PCM that is already running. Same thread as the
+// writes, as above.
+void audio_external_start(void);
 void audio_external_end(void);
 
 #endif // AUDIO_H

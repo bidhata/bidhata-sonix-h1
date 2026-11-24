@@ -678,6 +678,29 @@ static void panel_close(void) {
 	}
 }
 
+// How many days `month` (1 to 12) of `year` has.
+static int days_in_month(int year, int month) {
+	static const int DAYS[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+	if (month < 1 || month > 12) {
+		return 31;
+	}
+	bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+	return month == 2 && leap ? 29 : DAYS[month - 1];
+}
+
+// The day roller always lists 1 to 31. A day the chosen month does not have is
+// brought back to its last one, whichever of the three rollers moved: left as
+// it is, the 31st of April would be written as the 1st of May.
+static void date_changed_cb(lv_event_t *e) {
+	(void)e;
+	int month = (int)lv_roller_get_selected(roller_month) + 1;
+	int year = (int)lv_roller_get_selected(roller_year) + TIMESET_YEAR_FIRST;
+	int last = days_in_month(year, month);
+	if ((int)lv_roller_get_selected(roller_day) + 1 > last) {
+		lv_roller_set_selected(roller_day, (uint32_t)(last - 1), LV_ANIM_ON);
+	}
+}
+
 static void confirm_cb(lv_event_t *e) {
 	(void)e;
 
@@ -695,6 +718,11 @@ static void confirm_cb(lv_event_t *e) {
 	int year = (int)lv_roller_get_selected(roller_year) + TIMESET_YEAR_FIRST;
 	int hour = selected_hour24();
 	int minute = (int)lv_roller_get_selected(roller_minute);
+
+	// Confirm can be tapped while the day roller is still turning.
+	if (day > days_in_month(year, month)) {
+		day = days_in_month(year, month);
+	}
 
 	clock_set(year, month, day, hour, minute);
 	topbar_refresh_clock();
@@ -1103,6 +1131,9 @@ void timeset_init(gui_config_t *cfg) {
 	roller_day = make_roller(date_card, days_options, 86);
 	roller_month = make_roller(date_card, MONTHS, 184);
 	roller_year = make_roller(date_card, years_options, 110);
+	lv_obj_add_event_cb(roller_day, date_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+	lv_obj_add_event_cb(roller_month, date_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+	lv_obj_add_event_cb(roller_year, date_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
 	time_card = make_card(content);
 	roller_hour = make_roller(time_card, hours_options, 118);
