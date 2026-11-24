@@ -10,13 +10,17 @@ Open-source firmware that turns a pocket music player into the one you wished it
 every format, real streaming, video, a VU meter that moves with the music, and nothing you cannot change.
 
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
-![Players](https://img.shields.io/badge/players-HiBy%20R1%20%C2%B7%20R3%20Pro%20II-orange)
+![R1](https://img.shields.io/badge/HiBy%20R1-tested-success)
+![R3 Pro II](https://img.shields.io/badge/HiBy%20R3%20Pro%20II-untested-yellow)
 ![Written in C](https://img.shields.io/badge/written%20in-C%20%2B%20LVGL-informational)
 ![Languages](https://img.shields.io/badge/interface-12%20languages-success)
 
 [**Features**](FEATURES.md) · [**Install**](#install) · [**What is new here**](#what-this-fork-adds) · [**Build it**](#build-it-yourself) · [**Video guide**](VIDEO.md)
 
 </div>
+
+> [!WARNING]
+> **Tested on the HiBy R1 only.** The R3 Pro II images are built from the same source but have **never been run on a device** by this fork. A firmware that does not start leaves the player restarting in a loop, so if you flash one, have HiBy's stock `r3proii.upt` ready on a card to go back. Reports from R3 Pro II owners are very welcome.
 
 ---
 
@@ -195,8 +199,10 @@ The short version: it plays every format worth owning, streams, reads you books,
 
 Going back is the same steps with HiBy's original firmware.
 
-> [!NOTE]
-> **Where this has been run.** This fork's builds have been flashed and used on a **HiBy R1**. The R3 Pro II image is built from the same source but has **not been run on a device by this fork** yet. If you try it, keep the stock firmware on a card and tell us how it went.
+> [!WARNING]
+> **The R3 Pro II image is untested.** Every build here has been flashed and used on a **HiBy R1**. The `r3proii.upt` files are produced by the same build but nobody on this fork has started one on an R3 Pro II. Before you try it: charge the player, keep HiBy's stock firmware on a card, and expect that you may need it. If it works, or if it does not, please [open an issue](https://github.com/bidhata/bidhata-sonix-h1/issues/new/choose) and say so.
+
+Builds tagged `build-...` on the releases page are made automatically from the latest source and are pre-releases: nobody has run them at all.
 
 ## Streaming keys
 
