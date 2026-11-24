@@ -687,6 +687,8 @@ static void sd_clicked(void) {
 	lv_async_call(sd_run, NULL);
 }
 
+void fwupdate_start_from_card(void) { sd_run(NULL); }
+
 static void show_choice(void) {
 	layout(tr("system_update_firmware"), NULL, false, false);
 	set_button(0, "system_update_online", true, online_clicked);

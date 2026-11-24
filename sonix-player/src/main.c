@@ -73,6 +73,83 @@
 
 static volatile sig_atomic_t running = 1;
 
+#ifndef HOST_BUILD
+// ---------------------------------------------------------------------------
+// The developer's "install the image on the card".
+//
+// A build is tried by copying its .upt to the card over ADB and rebooting into
+// recovery. Done with the shell's own bootmode.sh and reboot, that goes round
+// everything the player does first for a user's update: stopping playback,
+// noting that the card was clean, unmounting it. The card comes back marked
+// "not removed safely" every time, and the path users take is the one path
+// never taken in testing.
+//
+// So the player takes the request itself, as a signal:
+//
+//     kill -<number> $(pidof sonix_player)
+//
+// and does exactly what Settings > System > Update firmware > From SD card
+// does. Only while ADB is switched on in Developer options: a signal can only
+// come from root, but there is no reason for it to do anything on a player
+// whose owner never asked for a developer's door. The number is in the log at
+// every start with ADB on ("firmware: signal 42 installs ...").
+//
+// The signal is not handled, it is read: blocked in every thread from the
+// first line of main() on, and collected through a descriptor the main loop
+// waits on anyway. A handler would interrupt whichever thread the kernel
+// picked, in the middle of whatever read or sleep it was in.
+//
+// And it is one of the real-time signals rather than SIGUSR1, because the
+// block is inherited by every program the player starts, and some of those
+// have a use of their own for SIGUSR1 (udhcpc renews its lease on it). Nothing
+// on the device uses this one.
+// ---------------------------------------------------------------------------
+#include <sys/signalfd.h>
+
+#include "src/gui/settings/fwupdate.h"
+#include "src/system/device/adb.h"
+
+#define UPDATE_SIGNAL (SIGRTMIN + 8)
+
+static int update_signal_fd = -1;
+
+// Before any thread exists, so that all of them inherit the block.
+static void update_signal_open(void) {
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, UPDATE_SIGNAL);
+	if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
+		return;
+	}
+	update_signal_fd = signalfd(-1, &set, SFD_NONBLOCK | SFD_CLOEXEC);
+}
+
+// The main loop found the descriptor readable. On the UI thread.
+static void update_signal_service(void) {
+	struct signalfd_siginfo info;
+	bool asked = false;
+	while (read(update_signal_fd, &info, sizeof(info)) == (ssize_t)sizeof(info)) {
+		asked = true; // several sent in a row are one request
+	}
+	if (!asked) {
+		return;
+	}
+	if (!adb_switched_on()) {
+		printf("firmware: signal %d ignored, ADB is off in Developer options\n", UPDATE_SIGNAL);
+		return;
+	}
+	printf("firmware: update from the card asked for by signal %d\n", UPDATE_SIGNAL);
+	fwupdate_start_from_card();
+}
+
+// Said once the log is open and the configuration read.
+static void update_signal_announce(void) {
+	if (update_signal_fd >= 0 && adb_switched_on()) {
+		printf("firmware: signal %d installs the update file on the card (ADB is on)\n", UPDATE_SIGNAL);
+	}
+}
+#endif
+
 #ifdef HOST_BUILD
 // Screenshot trigger on the simulator. The device uses volume-up plus power,
 // physical keys that do not exist here, so creating /tmp/sonix/shot takes their
@@ -1910,6 +1987,9 @@ int main(int argc, char **argv) {
 
 	// On this device dying means rebooting (see above).
 	install_signal_guards();
+#ifndef HOST_BUILD
+	update_signal_open();
+#endif
 
 	// How the allocator behaves matters more here than anywhere else. glibc
 	// raises its mmap threshold on its own once it sees large blocks being
@@ -2494,6 +2574,9 @@ int main(int argc, char **argv) {
 	// bridge timer polls fast in that case.
 	watchdog_start();
 
+#ifndef HOST_BUILD
+	update_signal_announce();
+#endif
 	printf("Entering main event loop...\n");
 	while (running) {
 		ui_heartbeat++;
@@ -2503,12 +2586,28 @@ int main(int argc, char **argv) {
 			time_till_next = MAIN_LOOP_MAX_SLEEP_MS; // also catches LV_NO_TIMER_READY
 		}
 
+#ifndef HOST_BUILD
+		// The developer's signal waits on the same poll: a negative
+		// descriptor, when it could not be opened, is simply skipped.
+		struct pollfd wake[2] = {{.fd = gui_post_wake_fd(), .events = POLLIN}, {.fd = update_signal_fd, .events = POLLIN}};
+		if (poll(wake, 2, (int)time_till_next) > 0) {
+			if (wake[1].revents & POLLIN) {
+				update_signal_service();
+			}
+			if (wake[0].revents) {
+				// Something was posted: drain the queue now instead of
+				// waiting for the bridge's own timer to come round.
+				gui_post_service();
+			}
+		}
+#else
 		struct pollfd wake = {.fd = gui_post_wake_fd(), .events = POLLIN};
 		if (poll(&wake, 1, (int)time_till_next) > 0) {
 			// Something was posted: drain the queue now instead of waiting
 			// for the bridge's own timer to come round.
 			gui_post_service();
 		}
+#endif
 	}
 
 	printf("\n");

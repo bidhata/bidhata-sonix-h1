@@ -22,4 +22,10 @@ void fwupdate_show(void);
 // when the level cannot be read.
 bool fwupdate_battery_ok(void);
 
+// What "From SD card" does once its card has closed: finds the update file on
+// the card, checks the battery, and starts the update, or says in a notice why
+// not. For the developer's trigger (see main.c), so that an image copied over
+// ADB is installed by the same code a user's is. UI thread only.
+void fwupdate_start_from_card(void);
+
 #endif /* FWUPDATE_H */
