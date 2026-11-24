@@ -399,7 +399,7 @@ static void feeds_fill(void) {
 	if (n < 0 || feed_count == 0 || !online) {
 		const char *why = n < 0 ? "podcast_opml_unreadable"
 					   : feed_count == 0 ? "podcast_opml_no_feeds"
-					   : !podcast_configured() ? "api_keys_unavailable"
+					   : !podcast_configured() ? "api_keys_own_note"
 											: "enable_wi_fi_first";
 		lv_label_set_text(feeds_note, tr(why));
 		lv_obj_set_hidden(feeds_note, false);

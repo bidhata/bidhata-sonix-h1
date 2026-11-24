@@ -109,6 +109,7 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 - **Radio** - thousands of stations by country, language or genre, plus search, favourites and recently played. MP3, AAC and FLAC stations.
   > **My stations** - write your own list in a `radio.txt` file in the root of the card, one station per line: `name, address`.
 - **Last.fm** - scrobbles what you listen to. Without Wi-Fi the plays are kept and sent the next time the player connects. Sign in by scanning a QR code with your phone, or with your password.
+- **Your own API keys** - a firmware built without the services' application keys turns Tidal, Qobuz, the podcast catalogue and Last.fm off. To turn one back on with keys of your own, put them in a text file named `streaming-keys.ini` in the root folder of the card (the form is in the README, under Streaming keys) and restart the player. Last.fm and Podcast Index give keys to anyone who asks; Tidal and Qobuz do not.
 
 ## Podcasts
 

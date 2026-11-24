@@ -69,6 +69,12 @@ typedef struct {
 // config_init() and streamkeys_init().
 void lastfm_init(void);
 
+// Takes the API keys from streamkeys again and starts the worker, for a
+// Last.fm that lastfm_init() left off for want of keys: after a keys file on
+// the card has been read (streamkeys_load_card). Startup only, on the main
+// thread. Does nothing when Last.fm is already running.
+void lastfm_keys_reload(void);
+
 bool lastfm_available(void);
 
 // Stored in the configuration. GUI thread.

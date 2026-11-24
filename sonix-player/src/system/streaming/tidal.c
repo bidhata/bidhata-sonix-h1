@@ -352,6 +352,14 @@ void tidal_init(void) {
 		   tidal_logged_in() ? "saved session" : "no session");
 }
 
+void tidal_keys_reload(void) {
+	const char *id = streamkeys_tidal_client_id();
+	const char *secret = streamkeys_tidal_client_secret();
+	snprintf(client_id, sizeof(client_id), "%s", id ? id : "");
+	snprintf(client_secret, sizeof(client_secret), "%s", secret ? secret : "");
+	printf("tidal: keys read again, %s\n", tidal_configured() ? "configured" : "no application keys");
+}
+
 bool tidal_configured(void) { return client_id[0] && client_secret[0]; }
 
 // The refresh token, not the access token: an expired access token is normal,

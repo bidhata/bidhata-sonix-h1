@@ -2122,6 +2122,25 @@ int main(int argc, char **argv) {
 	// card_databases_attach in system.c).
 	bool card_usable = storage_card_usable();
 
+	// The user's own application keys, from the card, for a firmware that
+	// brought none. Here because this is the first moment the card can be
+	// read, and still before the interface builds the pages that are drawn one
+	// way or the other depending on whether a service has its keys.
+	//
+	// The file is the user's own, so on the simulator it is looked for where
+	// the user's music is (music_path) and not under the storage layer's root,
+	// which there is the device's mount point. On the device the two are one.
+#ifdef HOST_BUILD
+	const char *keys_root = music_path;
+#else
+	const char *keys_root = card_usable ? storage_sd_root() : NULL;
+#endif
+	if (streamkeys_load_card(keys_root)) {
+		qobuz_keys_reload();
+		tidal_keys_reload();
+		lastfm_keys_reload();
+	}
+
 #ifndef HOST_BUILD
 	logging_attach_sd(card_usable ? storage_sd_root() : NULL);
 	btlog_card_attach(card_usable ? storage_sd_root() : NULL);

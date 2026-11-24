@@ -77,6 +77,14 @@ void qobuz_init(void) {
 		   auth_token[0] ? "saved session" : "no session");
 }
 
+void qobuz_keys_reload(void) {
+	const char *id = streamkeys_qobuz_app_id();
+	const char *secret = streamkeys_qobuz_app_secret();
+	snprintf(app_id, sizeof(app_id), "%s", id ? id : "");
+	snprintf(app_secret, sizeof(app_secret), "%s", secret ? secret : "");
+	printf("qobuz: keys read again, %s\n", qobuz_configured() ? "configured" : "no application keys");
+}
+
 bool qobuz_configured(void) { return app_id[0] && app_secret[0]; }
 bool qobuz_logged_in(void) { return qobuz_configured() && auth_token[0]; }
 const char *qobuz_display_name(void) { return display_name; }

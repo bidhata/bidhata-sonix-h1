@@ -45,17 +45,36 @@
 // and its menu entry says so instead of failing halfway through a login.
 //
 // The path can be changed with [streaming] keys_file in device_config.ini, to
-// keep the keys on the card instead of the read-only rootfs -- the easy path
-// the day a service changes its keys.
+// a file that is there before the card is mounted (on /usr/data): the keys are
+// read first thing, and the card comes later.
+//
+// A firmware built without keys leaves the door open to the user's own: a
+// plain INI of the same shape at STREAMKEYS_CARD_FILE on the card is read
+// once the card is mounted at startup (streamkeys_load_card). Only then: a
+// firmware that brought a keys file of its own is never overridden by a card,
+// and a card put in after the player has started is read at the next start.
 
 #include "src/system/core/respath.h"
 
 #define STREAMKEYS_PATH SONIX_RESOURCE_DIR "/components/streaming-keys.bin"
 #define STREAMKEYS_PLAIN_PATH SONIX_RESOURCE_DIR "/components/streaming-keys.ini"
 
+// The user's own keys, in the card's root folder. Not in .local with the
+// player's own files: the pages that tell the user where to put it write the
+// name out, and a name that starts with a dot is broken after the dot when
+// the line wraps, which reads as another name.
+#define STREAMKEYS_CARD_FILE "streaming-keys.ini"
+
 // Reads the file. Call once at startup, after config_init(). A missing file is
 // not an error.
 void streamkeys_init(void);
+
+// Reads STREAMKEYS_CARD_FILE under `sd_root` when streamkeys_init() found no
+// file at all. True when it was read and held at least one key: the services
+// then take their keys again (qobuz_keys_reload and the like). Call once at
+// startup, on the main thread, after the card is mounted and before anything
+// uses a service -- the values are plain buffers with no lock around them.
+bool streamkeys_load_card(const char *sd_root);
 
 // NULL when absent. The pointers stay valid for the life of the program.
 const char *streamkeys_qobuz_app_id(void);

@@ -148,6 +148,11 @@ typedef struct {
 // after config_init() and streamkeys_init().
 void tidal_init(void);
 
+// Takes the application keys from streamkeys again, after a keys file on the
+// card has been read (streamkeys_load_card). Startup only, on the main thread,
+// before any request: nothing guards the two buffers.
+void tidal_keys_reload(void);
+
 // False when the keys file is missing: the service is not broken, it is off,
 // and the menu entry has to say so instead of trying and failing.
 bool tidal_configured(void);

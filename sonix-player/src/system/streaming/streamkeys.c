@@ -248,6 +248,20 @@ static bool load(const char *path) {
 	return true;
 }
 
+// `path` is where the keys came from.
+static void found(const char *path) {
+	snprintf(source_path, sizeof(source_path), "%s", path);
+
+	// The log records that the keys are present, never their values: the log
+	// lands on the card and from there goes to whoever asks for it about any
+	// problem at all.
+	printf("streamkeys: from %s -- Qobuz %s, Tidal %s, Podcast %s, Last.fm %s\n", path,
+		   qobuz_app_id[0] && qobuz_app_secret[0] ? "yes" : "no",
+		   tidal_client_id[0] && tidal_client_secret[0] ? "yes" : "no",
+		   podcast_key[0] && podcast_secret[0] ? "yes" : "no",
+		   lastfm_key[0] && lastfm_secret[0] ? "yes" : "no");
+}
+
 void streamkeys_init(void) {
 	const char *configured = config_get("streaming", "keys_file", NULL);
 	const char *path = NULL;
@@ -260,21 +274,26 @@ void streamkeys_init(void) {
 	}
 
 	if (!path) {
-		printf("streamkeys: no %s, Tidal, Qobuz, podcasts and Last.fm stay off\n",
+		printf("streamkeys: no %s, Tidal, Qobuz, podcasts and Last.fm stay off unless the card brings keys\n",
 			   configured && configured[0] ? configured : STREAMKEYS_PATH);
 		return;
 	}
+	found(path);
+}
 
-	snprintf(source_path, sizeof(source_path), "%s", path);
-
-	// The log records that the keys are present, never their values: the log
-	// lands on the card and from there goes to whoever asks for it about any
-	// problem at all.
-	printf("streamkeys: from %s -- Qobuz %s, Tidal %s, Podcast %s, Last.fm %s\n", path,
-		   qobuz_app_id[0] && qobuz_app_secret[0] ? "yes" : "no",
-		   tidal_client_id[0] && tidal_client_secret[0] ? "yes" : "no",
-		   podcast_key[0] && podcast_secret[0] ? "yes" : "no",
-		   lastfm_key[0] && lastfm_secret[0] ? "yes" : "no");
+bool streamkeys_load_card(const char *sd_root) {
+	// A file the firmware or the configuration named has the last word, with
+	// or without every service in it.
+	if (source_path[0] || !sd_root || !sd_root[0]) {
+		return false;
+	}
+	char path[sizeof(source_path)];
+	int n = snprintf(path, sizeof(path), "%s/%s", sd_root, STREAMKEYS_CARD_FILE);
+	if (n < 0 || (size_t)n >= sizeof(path) || !load(path)) {
+		return false;
+	}
+	found(path);
+	return loaded_any;
 }
 
 static const char *or_null(const char *s) { return s[0] ? s : NULL; }

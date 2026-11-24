@@ -323,6 +323,32 @@ a `.bin` holds.
 This keeps the keys out of plain sight, not out of reach: the key is inside
 `sonix_player`, and whoever takes the binary apart can get them back.
 
+#### A user's own keys, on the card
+
+An image built without keys (no `streaming-keys.bin`, which is what the packer
+warns about) reads the user's own from the card: a plain text file
+`streaming-keys.ini` in the root folder of the microSD card, in the same form as
+`streaming-keys.ini.example`. Only the services that have both of their keys
+in the file come on; the others stay off.
+
+```ini
+[lastfm]
+api_key = ...
+api_secret = ...
+
+[podcast]
+api_key = ...
+api_secret = ...
+```
+
+- It is read once, when the player starts with the card in. After putting the
+  file on the card, or changing it, restart the player.
+- An image that carries a keys file of its own never reads the card's.
+- The file is plain text: anyone who has the card can read the keys in it.
+- Last.fm keys come from an API account on last.fm/api, Podcast Index keys
+  from podcastindex.org. Tidal and Qobuz do not give application keys to
+  individuals.
+
 ### What it needs installed
 
 ```bash

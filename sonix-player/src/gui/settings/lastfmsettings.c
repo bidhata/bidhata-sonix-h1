@@ -95,7 +95,7 @@ static void refresh(void) {
 		break;
 	}
 	lv_label_set_text(status_value, status);
-	lv_label_set_text(note_label, tr(st.state == LASTFM_STATE_UNAVAILABLE ? "api_keys_unavailable" : "lastfm_note"));
+	lv_label_set_text(note_label, tr(st.state == LASTFM_STATE_UNAVAILABLE ? "api_keys_own_note" : "lastfm_note"));
 	lv_label_set_text_fmt(queued_value, "%d", st.queued);
 }
 

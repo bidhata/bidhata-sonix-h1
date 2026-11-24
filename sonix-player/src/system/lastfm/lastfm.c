@@ -72,6 +72,7 @@ typedef struct {
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wake;
 static bool started;
+static bool initialised; // lastfm_init() has run, with or without keys
 
 static const char *api_key;
 static const char *api_secret;
@@ -1272,8 +1273,26 @@ static void *worker_main(void *arg) {
 // the public side
 // ---------------------------------------------------------------------------
 
+// Starts the worker when both keys are there. Everything else lastfm_init()
+// sets up does not depend on them.
+static void start_worker(void) {
+	if (!api_key || !api_secret) {
+		printf("lastfm: no API keys; Last.fm stays off\n");
+		return;
+	}
+
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, worker_main, NULL) != 0) {
+		fprintf(stderr, "lastfm: cannot start the worker\n");
+		return;
+	}
+	pthread_detach(thread);
+	started = true;
+	printf("lastfm: %s, %s\n", enabled ? "on" : "off", session_key[0] ? "signed in" : "signed out");
+}
+
 void lastfm_init(void) {
-	if (started) {
+	if (initialised) {
 		return;
 	}
 	api_key = streamkeys_lastfm_key();
@@ -1292,19 +1311,19 @@ void lastfm_init(void) {
 	session_expired = !session_key[0] && user[0];
 	pthread_mutex_unlock(&lock);
 
-	if (!api_key || !api_secret) {
-		printf("lastfm: no API keys; Last.fm stays off\n");
-		return;
-	}
+	initialised = true;
+	start_worker();
+}
 
-	pthread_t thread;
-	if (pthread_create(&thread, NULL, worker_main, NULL) != 0) {
-		fprintf(stderr, "lastfm: cannot start the worker\n");
+void lastfm_keys_reload(void) {
+	// Only a Last.fm that is waiting for keys: one that is running keeps the
+	// pair its worker is already signing with.
+	if (!initialised || started) {
 		return;
 	}
-	pthread_detach(thread);
-	started = true;
-	printf("lastfm: %s, %s\n", enabled ? "on" : "off", session_key[0] ? "signed in" : "signed out");
+	api_key = streamkeys_lastfm_key();
+	api_secret = streamkeys_lastfm_secret();
+	start_worker();
 }
 
 bool lastfm_available(void) { return started; }
