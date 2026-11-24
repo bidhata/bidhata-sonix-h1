@@ -1,0 +1,11 @@
+out/*
+!out/.keep
+boards/*/stock.dtb
+boards/*/stock.kallsyms
+boards/*/vmlinux-stock
+__pycache__/
+*.pyc
+.DS_Store
+build/
+
+ingenic-linux-kernel4.4.94-x1600-v6.0-20240606.tar.bz2
