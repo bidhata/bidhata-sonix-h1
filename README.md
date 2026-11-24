@@ -180,7 +180,7 @@ The short version: it plays every format worth owning, streams, reads you books,
 
 - **Charge limit** to make the battery last: 80% on the R1, 80% to 100% on the R3 Pro II.
 - **Standby** and **auto power-off**, from 15 minutes to 48 hours.
-- **SD card page**: how full the card is, what it is formatted as, whether it was pulled out without being unmounted, **Check card** (reads the whole FAT32 filesystem, frees space that belongs to no file, reports anything worse), a speed test that checks what it reads back, and **Format** (FAT32, after asking twice).
+- **SD card page**: how full the card is, what it is formatted as, whether it was pulled out without being unmounted, **Check card** (reads the whole FAT32 or exFAT filesystem, frees space that belongs to no file, reports anything worse), a speed test that checks what it reads back, and **Format** (FAT32, after asking twice).
 - **Firmware update** from the card or over the internet.
 - **Developer options**: ADB, logs to the card, and a process and memory view.
 

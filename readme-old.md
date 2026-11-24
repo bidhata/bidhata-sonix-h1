@@ -470,6 +470,25 @@ the overlay - any other file need to be in the respective folder mirroring the r
 > It is recommended to **charge above 30%** first. 
 **Recovery from a failed flash:** If something goes wrong, you can always restore by flashing the original stock firmware from HiBy's website using the same procedure.
 
+**Flashing over ADB, for developers.** With ADB switched on in Developer options, the player installs the image on the card when it is sent a signal, exactly as *From SD card* does, so there is no need to touch the screen:
+
+```bash
+adb push r1.upt /mnt/sd_0/r1.upt
+adb shell 'kill -42 $(pidof sonix_player)'
+```
+
+The signal's number is printed in the log at every start with ADB on (`firmware: signal 42 installs ...`). With ADB off the signal is ignored. This goes through the player's own update path; arming recovery by hand with `bootmode.sh` and `reboot` skips it, and leaves the card marked "Not removed safely".
+
+### Tests
+
+`bash tests/run.sh`, from `sonix-player/`, runs everything there is:
+
+- the SACD ISO, DST and DSD decoders against generated files;
+- every other audio format through the player's own decoder layer: a tone is encoded with `ffmpeg` and has to come back out at the right rate, length, pitch and level (`tests/decode_formats_test.sh`);
+- the card checker against FAT32 and exFAT images with lost clusters to free and damage to refuse (`tests/fatcheck_test.sh`, `tests/exfatcheck_test.sh`; the exFAT one mounts images, so it needs root).
+
+It needs `ffmpeg`, `libopusfile-dev`, `libwavpack-dev`, `dosfstools`, `mtools` and `exfatprogs`, and `libfdk-aac2` and `libsndfile1` for the formats those two decode. A part whose tools are missing is skipped and says so. The release workflow runs the same script before it builds anything.
+
 
 ## Generated files
 

@@ -181,7 +181,7 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 - **AirPlay** - play from an iPhone, iPad or Mac on the player.
 - **DLNA** - send music to the player from an app on your phone (needs a microSD card).
 - **Wi-Fi transfer** - open `sonix-transfer.local` (or the address on screen) in a browser on the same Wi-Fi to upload files and folders, download, rename, move and delete, and see hidden files. Music stops while it is on.
-- **SonixLink** - control the player from the SonixLink app on your phone, over Wi-Fi or Bluetooth: browse the library, the queue and the favourites, with covers.
+- **SonixLink** - control the player from the SonixLink app on your phone, over Wi-Fi or Bluetooth: browse the library, the queue and the favourites, with covers. It is off whenever the player starts and is switched on from the Control centre or its own page when wanted: it has no password, so it does not stay on by itself.
 - **USB storage** - with the player on, connect it to a computer or a phone with the cable and the microSD shows up as a drive. With Detect changes on, the library picks up the new music when you unplug it.
 
 ## Control centre and status bar
@@ -227,7 +227,7 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 - **Firmware update** - over the internet with the full list of changes, or from a `.upt` file on the card.
 - **About** - device, serial number, card space and version.
 - **SD card** - a page for the card itself (Settings > System > SD card): how full it is, what it is formatted as, and whether it was taken out without being unmounted the last time.
-- **Check card** - checks a FAT32 card without a computer. It reads the whole filesystem and looks for what an unsafe removal leaves behind. Space held by data that belongs to no file it frees, after asking; anything worse it reports and leaves for a computer. A card found whole loses its "Not removed safely" mark. Music stops while the card is checked.
+- **Check card** - checks a FAT32 or exFAT card without a computer. It reads the whole filesystem and looks for what an unsafe removal leaves behind. Space held by data that belongs to no file it frees, after asking; anything worse it reports and leaves for a computer. A card found whole loses its "Not removed safely" mark. Music stops while the card is checked.
 - **Speed test** - writes a 16 MB file to the card, reads it back and checks every byte, then shows both speeds.
 - **Format card** - erases the card and formats it as FAT32, after asking twice; it refuses while a game, a book, a video or a download still has a file open. Repairing damaged files and formatting as exFAT are done on a computer.
 - **Factory reset** - settings, Wi-Fi networks and Bluetooth devices are erased. The music on the card is not touched.
