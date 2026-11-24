@@ -53,7 +53,7 @@ every format, real streaming, video, a VU meter that moves with the music, and n
 </tr>
 </table>
 
-## Why
+## WHY
 
 The HiBy R1 costs less than a pair of decent earphones and has a good DAC in it. The software it ships with does not do it justice. Bidhata's Modded SonixOS replaces the whole player: the interface, the audio chain, the Bluetooth stack, even the drivers. One binary, written in C on LVGL, runs on both players.
 
