@@ -48,7 +48,7 @@ every format, real streaming, video, a VU meter that moves with the music, and n
 </td>
 <td width="50%" align="center" valign="top">
 <img src="docs/screenshots/sd-card.png" width="62%" alt="The SD card page: file system, state, speed test and format"><br>
-<b>SD card.</b> File system, a warning when the card was pulled out unsafely, a speed test with its result, and Format.
+<b>SD card.</b> File system, a warning when the card was pulled out unsafely, a check for errors, a speed test with its result, and Format.
 </td>
 </tr>
 </table>
@@ -63,14 +63,14 @@ It is a fork of [Sonix Player](https://github.com/Tartarus6/sonix-player) by Tar
 
 | | |
 |---|---|
-| 🎬 **Video player** | MPEG-4 and H.264 films from the card, full screen and turned sideways, with a seek bar you can drag, resume where you left off, and sound over Bluetooth. A [script](VIDEO.md) converts anything for the screen. |
+| 🎬 **Video player** | MPEG-4 and H.264 films from the card, full screen and turned sideways, with a seek bar you can drag, `.srt` subtitles, resume where you left off, and sound over Bluetooth. A [script](VIDEO.md) converts anything for the screen. |
 | 📊 **VU meter, three ways** | Two bars, two needle dials or a ten-band spectrum on Now Playing. Tap to switch. It follows the sound you hear, not the sound just sent to the output. |
 | 🔑 **Bring your own API keys** | No keys in the firmware? Drop a `streaming-keys.ini` on the card and Last.fm and the podcast catalogue come alive. |
 | 📱 **Last.fm by QR code** | Scan, approve on your phone, done. No password typed on a tiny screen. |
 | ⏱️ **Track lengths everywhere** | In every list, in search, and as an album's running time. |
 | 🌙 **Auto sleep timer** | A nightly window in which playback stops by itself. |
 | ⏪ **Jump back and forward** | On remapped buttons and on the wired remote. |
-| 💾 **SD card page** | How full, what format, whether it was pulled out unsafely, a speed test that verifies what it reads back, and Format. |
+| 💾 **SD card page** | How full, what format, whether it was pulled out unsafely, a check that frees space lost to an interrupted write, a speed test that verifies what it reads back, and Format. |
 | 🛠️ **A full audit** | Fixes across audio, decoders, the library, streaming, Bluetooth, USB and power. |
 
 Upstream's own additions are merged too: SACD ISO playback, a custom accent colour picker, and Hebrew text.
@@ -149,7 +149,7 @@ The short version: it plays every format worth owning, streams, reads you books,
 
 ### 🎬 Video, games and extras
 
-- **Video player**: MPEG-4 and H.264 films from the card's `Video` folder, full screen and turned sideways, with pause, 10-second skips, a seek bar you can drag, elapsed and total time, and resume where you left off. Sound on the socket or over Bluetooth. Films are [converted on a computer first](#converting-a-video).
+- **Video player**: MPEG-4 and H.264 films from the card's `Video` folder, full screen and turned sideways, with pause, 10-second skips, a seek bar you can drag, elapsed and total time, subtitles from a `.srt` file beside the film, and resume where you left off. Sound on the socket or over Bluetooth. Films are [converted on a computer first](#converting-a-video).
 - **Game Boy**: Game Boy and Game Boy Color games through Gearboy, with save states, five palettes, shaders and colour correction.
 - **File manager**: browse, create, rename, move, copy and delete. Pictures, text files and videos open right there.
 - **Metronome** with tap tempo, and **Flappy Bird**, because why not.
@@ -180,7 +180,7 @@ The short version: it plays every format worth owning, streams, reads you books,
 
 - **Charge limit** to make the battery last: 80% on the R1, 80% to 100% on the R3 Pro II.
 - **Standby** and **auto power-off**, from 15 minutes to 48 hours.
-- **SD card page**: how full the card is, what it is formatted as, whether it was pulled out without being unmounted, a speed test that checks what it reads back, and **Format** (FAT32, after asking twice).
+- **SD card page**: how full the card is, what it is formatted as, whether it was pulled out without being unmounted, **Check card** (reads the whole FAT32 filesystem, frees space that belongs to no file, reports anything worse), a speed test that checks what it reads back, and **Format** (FAT32, after asking twice).
 - **Firmware update** from the card or over the internet.
 - **Developer options**: ADB, logs to the card, and a process and memory view.
 

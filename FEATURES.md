@@ -158,7 +158,7 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 - **Metronome** - 30 to 250 BPM, up to 7 beats per bar, and tap tempo.
 - **Game Boy** (Gearboy) - plays Game Boy and Game Boy Color games, with their real names, save states, five palettes, shaders and color correction.
   > ROMs go in `Games/GB` and `Games/GBC`. The boot ROMs (optional) go in `Games/Bios`: `dmg_boot.bin` and `cgb_boot.bin`.
-- **Video** - plays videos from the `Video` folder of the card, turned sideways to fill the screen, with pause, 10-second skips and a progress bar you can drag or tap to go anywhere in the film.
+- **Video** - plays videos from the `Video` folder of the card, turned sideways to fill the screen, with pause, 10-second skips and a progress bar you can drag or tap to go anywhere in the film. A film opens where it was left. **Subtitles** show when a `.srt` file with the film's name lies beside it (`Film.mp4` and `Film.srt`, or `Film.en.srt`).
   > Videos have to be converted first: the player has no hardware decoder and does not scale. `tools/video-convert.sh` (on a computer, needs ffmpeg) makes an MPEG-4 `.mp4` no larger than the screen from anything ffmpeg reads. [VIDEO.md](VIDEO.md) has the details.
 - **Flappy Bird**, with sounds.
 
@@ -215,6 +215,6 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 - **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Polski, Português BR, Čeština, Russian, Chinese and Japanese. Titles in Korean, Thai and Arabic are shown too.
 - **Firmware update** - over the internet with the full list of changes, or from a `.upt` file on the card.
 - **About** - device, serial number, card space and version.
-- **SD card** - a page for the card itself (Settings > System > SD card): how full it is, what it is formatted as, and whether it was taken out without being unmounted the last time. A **speed test** writes a 16 MB file, reads it back and checks it. **Format card** erases the card and formats it as FAT32, after asking twice; it refuses while a game, a book, a video or a download still has a file open. Checking a card for errors and formatting as exFAT are done on a computer: the player has no tool for either.
+- **SD card** - a page for the card itself (Settings > System > SD card): how full it is, what it is formatted as, and whether it was taken out without being unmounted the last time. A **speed test** writes a 16 MB file, reads it back and checks it. **Check card** (FAT32 cards) reads the whole filesystem and looks for what an unsafe removal leaves behind; space held by data that belongs to no file it can free, after asking, and anything worse it reports and leaves for a computer. **Format card** erases the card and formats it as FAT32, after asking twice; it refuses while a game, a book, a video or a download still has a file open. Repairing damaged files and formatting as exFAT are done on a computer.
 - **Factory reset** - settings, Wi-Fi networks and Bluetooth devices are erased. The music on the card is not touched.
 - **Developer options** - tap "Build number" five times in About: ADB, log to the microSD, database log, Bluetooth log, and running processes and memory.
