@@ -47,7 +47,7 @@ every format, real streaming, video, a VU meter that moves with the music, and n
 <b>VU dials.</b> Two needles and a held peak mark over the cover. Tap for bars or a ten-band spectrum.
 </td>
 <td width="50%" align="center" valign="top">
-<img src="docs/screenshots/sd-card.png" width="62%" alt="The SD card page: file system, state, speed test and format"><br>
+<img src="docs/screenshots/sd-card.png" width="62%" alt="The SD card page: file system, state, Check card with its result, and the speed test"><br>
 <b>SD card.</b> File system, a warning when the card was pulled out unsafely, a check for errors, a speed test with its result, and Format.
 </td>
 </tr>
@@ -173,7 +173,7 @@ The short version: it plays every format worth owning, streams, reads you books,
 - **Boot logo** and **screensaver** from your own pictures.
 - **Control centre**: pull down from the status bar for brightness and a row of switches you choose and order yourself.
 - **Remap every button**, add double-click actions, and jump back or forward inside a track from the wired remote.
-- **Twelve interface languages**, eleven keyboard layouts including a T9 keypad and Japanese kana input.
+- **Twelve interface languages**, eleven keyboard layouts including a T9 keypad and Japanese kana input. Titles and subtitles in Korean, Thai, Arabic, Hebrew and Hindi are shown too (Hindi with its letters unjoined).
 - Text size, rounded corners, where the clock sits, 180° rotation, double tap to wake on the R3 Pro II.
 
 ### 🔋 Power and care
