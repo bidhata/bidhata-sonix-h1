@@ -70,7 +70,7 @@ jobs:
     timeout-minutes: 240
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Decide the tag and the version
         id: ver
@@ -109,7 +109,7 @@ jobs:
 
       # The cross toolchain changes only with the script that builds it.
       - name: Cache the cross toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: sonix-player/rockbox-toolchain
           key: toolchain-${{ runner.os }}-${{ hashFiles('sonix-player/rockboxdev/**') }}
@@ -117,7 +117,7 @@ jobs:
       # FreeType, the audio libraries and FFmpeg, built by the Makefile with
       # that toolchain: they change with either.
       - name: Cache the static libraries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             sonix-player/freetype-target
@@ -230,11 +230,11 @@ jobs:
             gh release upload "$TAG" $(cat assets.txt) SHA256SUMS.txt --clobber
           else
             gh release create "$TAG" $(cat assets.txt) SHA256SUMS.txt \
-              --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md --generate-notes $flags
+              --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md $flags
           fi
 
       - name: Keep the debug binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sonix_player_debug-${{ steps.ver.outputs.tag }}
           path: sonix-player/sonix_player_debug
