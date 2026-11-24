@@ -1444,7 +1444,7 @@ storage_format_result_t storage_format_card(void) {
 // ---------------------------------------------------------------------------
 
 bool storage_check_supported(void) {
-	return g_storage_cfg && g_storage_cfg->manage_mount && !getenv("SONIX_NO_MOUNT") && card_fs == CARD_FS_FAT32;
+	return g_storage_cfg && g_storage_cfg->manage_mount && !getenv("SONIX_NO_MOUNT") && (card_fs == CARD_FS_FAT32 || card_fs == CARD_FS_EXFAT);
 }
 
 // Counts the files and the folders under `dir`, through the mounted
@@ -1544,8 +1544,12 @@ storage_check_result_t storage_check_card(bool repair, uint64_t *lost_bytes) {
 
 	// A card found whole, or made whole, is no longer one that "was not
 	// removed safely": the mark asks for exactly this check.
+	//
+	// On FAT32, that is: there the mark stays until something takes it off.
+	// The exFAT driver lowers its own when it unmounts a card cleanly, which
+	// the unmount above has just done.
 	bool whole = ran && (found.status == FATCHECK_CLEAN || (found.status == FATCHECK_LOST && found.repaired));
-	if (whole && card_unclean == 1) {
+	if (whole && card_unclean == 1 && card_fs == CARD_FS_FAT32) {
 		unsigned char boot[512];
 		int fd = open(device, O_RDONLY | O_CLOEXEC);
 		bool got = fd >= 0 && read(fd, boot, sizeof(boot)) == (ssize_t)sizeof(boot);

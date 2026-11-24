@@ -138,13 +138,13 @@ storage_format_result_t storage_format_card(void);
 bool storage_format_active(void);
 
 // Checking the card's filesystem, and giving back the space of clusters no
-// file owns (see fatcheck.h for what that is and is not). FAT32 only.
+// file owns (see fatcheck.h for what that is and is not). FAT32 and exFAT.
 typedef enum {
 	STORAGE_CHECK_CLEAN,	   // nothing wrong; a "not removed safely" mark is taken off
 	STORAGE_CHECK_LOST,		   // lost clusters, not freed: a check that was not asked to repair
 	STORAGE_CHECK_REPAIRED,	   // lost clusters, freed
 	STORAGE_CHECK_DAMAGED,	   // something only a computer can put right; nothing was changed
-	STORAGE_CHECK_UNSUPPORTED, // not FAT32, or a card this player does not mount itself (the simulator)
+	STORAGE_CHECK_UNSUPPORTED, // neither FAT32 nor exFAT, or a card this player does not mount itself (the simulator)
 	STORAGE_CHECK_NO_CARD,	   // no card, or it is with a computer over USB
 	STORAGE_CHECK_BUSY,		   // something has a file open on it; nothing was looked at
 	STORAGE_CHECK_FAILED,	   // the card could not be read or written

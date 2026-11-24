@@ -102,8 +102,8 @@ static void refresh(void) {
 		lv_obj_set_hidden(unclean_note, !unclean);
 	}
 
-	// Only for a card the check can read, so the row comes and goes with the
-	// card that is in.
+	// Only for a card the check can read (FAT32, exFAT), so the row comes and
+	// goes with the card that is in.
 	bool can_check = present && storage_check_supported();
 	lv_obj_set_hidden(check_row, !can_check);
 	lv_obj_set_hidden(check_note, !can_check);

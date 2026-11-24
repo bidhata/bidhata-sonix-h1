@@ -10,7 +10,7 @@
 // check of its filesystem, a short speed test, and formatting it.
 //
 // The check is the player's own and does one repair: it frees the space of
-// clusters no file owns (system/device/fatcheck.h). The usual tools do more
+// clusters no file owns, on FAT32 and exFAT cards (system/device/fatcheck.h). The usual tools do more
 // and are not here because they need more memory than the player has for a
 // card of any usual size; for what the check finds and cannot repair the page
 // points at a computer. Trimming is not offered either: the card driver takes

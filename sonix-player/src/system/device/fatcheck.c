@@ -136,7 +136,7 @@ static bool read_layout(card_t *card) {
 	// FAT32 says so itself at offset 82. exFAT and the older FATs are told
 	// apart by the same bytes the storage code looks at.
 	if (boot[510] != 0x55 || boot[511] != 0xAA || memcmp(boot + 82, "FAT32", 5) != 0) {
-		return failed(card, FATCHECK_UNSUPPORTED, "not FAT32");
+		return failed(card, FATCHECK_UNSUPPORTED, "neither FAT32 nor exFAT");
 	}
 
 	card->sector_bytes = le16(boot + 11);
@@ -523,6 +523,470 @@ static bool free_lost(card_t *card, uint32_t free_after) {
 }
 
 // ---------------------------------------------------------------------------
+// exFAT
+//
+// The same question asked of a different book. exFAT does not say which
+// clusters are taken in its allocation table: it keeps a bitmap for that, a
+// bit per cluster, and the table only strings together the clusters of a file
+// that is in pieces. A file in one piece is marked as such in its folder
+// entry and has no chain at all. So a cluster is lost here when its bit is
+// set and nothing in the tree reaches it, and freeing it is clearing the bit.
+// ---------------------------------------------------------------------------
+
+#define X_ENTRY_END 0x00
+#define X_ENTRY_IN_USE 0x80 // the top bit of the type: clear on an entry that was deleted
+#define X_ENTRY_BITMAP 0x81
+#define X_ENTRY_UPCASE 0x82
+#define X_ENTRY_FILE 0x85
+#define X_ENTRY_STREAM 0xC0
+#define X_STREAM_ONE_PIECE 0x02 // "no chain": the clusters follow one another
+#define X_ATTR_FOLDER 0x10
+
+#define X_ENTRY_LAST 0xFFFFFFF8u
+#define X_ENTRY_BAD 0xFFFFFFF7u
+
+// Folders are read this much at a time. A cluster can be megabytes here.
+#define X_BLOCK_BYTES 65536u
+// And the largest cluster taken on: the bitmap is read in whole clusters.
+#define X_MAX_CLUSTER_BYTES (4u * 1024 * 1024)
+
+typedef struct {
+	uint32_t first;
+	uint64_t bytes;
+	bool one_piece;
+} x_extent_t;
+
+typedef struct {
+	card_t *card;
+	x_extent_t *folders; // found and not yet read
+	uint32_t folder_count, folder_room;
+	uint32_t *bitmap_clusters; // where the bitmap lies, in order
+	uint32_t bitmap_cluster_count;
+	uint64_t bitmap_bytes;
+	bool bitmap_seen;
+} xcard_t;
+
+static uint64_t le64(const uint8_t *p) { return (uint64_t)le32(p) | (uint64_t)le32(p + 4) << 32; }
+static uint32_t x_fat_entry(const card_t *card, uint32_t c) { return le32(card->fat + (size_t)c * 4); }
+
+// A walk along the clusters of a file or folder, whichever way they are kept.
+typedef struct {
+	card_t *card;
+	uint32_t next;	// the cluster to hand out; 0 when there are no more
+	uint32_t left;	// one piece: how many are still to come
+	bool one_piece;
+} x_walk_t;
+
+static void x_walk_begin(x_walk_t *walk, card_t *card, const x_extent_t *extent) {
+	walk->card = card;
+	walk->one_piece = extent->one_piece;
+	walk->next = extent->first;
+	uint64_t clusters = (extent->bytes + card->cluster_bytes - 1) / card->cluster_bytes;
+	// More clusters than the card has is caught at the first one that is not
+	// there, so the count only has to fit.
+	walk->left = clusters > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)clusters;
+	if (walk->one_piece && walk->left == 0) {
+		walk->next = 0;
+	}
+}
+
+// The next cluster of the walk, taken for the tree. 1 with `*c`, 0 at the
+// end, -1 when the chain is broken.
+static int x_walk_next(x_walk_t *walk, uint32_t *c) {
+	card_t *card = walk->card;
+	if (walk->next == 0) {
+		return 0;
+	}
+	uint32_t here = walk->next;
+	if (!valid_cluster(card, here)) {
+		damaged(card, "a file points at cluster %u, which the card does not have", (unsigned)here);
+		return -1;
+	}
+	if (is_owned(card, here)) {
+		damaged(card, "cluster %u belongs to two files", (unsigned)here);
+		return -1;
+	}
+	set_owned(card, here);
+
+	if (walk->one_piece) {
+		walk->left--;
+		walk->next = walk->left ? here + 1 : 0;
+	} else {
+		uint32_t entry = x_fat_entry(card, here);
+		if (entry >= X_ENTRY_LAST) {
+			walk->next = 0;
+		} else if (entry == X_ENTRY_BAD || !valid_cluster(card, entry)) {
+			damaged(card, "the chain is broken at cluster %u", (unsigned)here);
+			return -1;
+		} else {
+			walk->next = entry;
+		}
+	}
+	*c = here;
+	return 1;
+}
+
+// Takes every cluster of a file. With a chain, the chain has to be as long as
+// the file says it is.
+static bool x_take_file(card_t *card, const x_extent_t *extent) {
+	x_walk_t walk;
+	x_walk_begin(&walk, card, extent);
+	uint64_t taken = 0;
+	uint32_t c;
+	int more;
+	while ((more = x_walk_next(&walk, &c)) > 0) {
+		taken++;
+	}
+	if (more < 0) {
+		return false;
+	}
+	uint64_t needed = (extent->bytes + card->cluster_bytes - 1) / card->cluster_bytes;
+	if (taken < needed) {
+		return damaged(card, "a file of %llu bytes has only %llu clusters", (unsigned long long)extent->bytes, (unsigned long long)taken);
+	}
+	return true;
+}
+
+static bool x_remember_folder(xcard_t *x, const x_extent_t *extent) {
+	if (x->folder_count == x->folder_room) {
+		uint32_t room = x->folder_room ? x->folder_room * 2 : 256;
+		x_extent_t *grown = realloc(x->folders, (size_t)room * sizeof(*grown));
+		if (!grown) {
+			return failed(x->card, FATCHECK_NO_MEMORY, "no memory for the list of folders");
+		}
+		x->folders = grown;
+		x->folder_room = room;
+	}
+	x->folders[x->folder_count++] = *extent;
+	return true;
+}
+
+// The bitmap's own clusters, kept in order: they are where the repair writes.
+static bool x_take_bitmap(xcard_t *x, uint32_t first, uint64_t bytes) {
+	card_t *card = x->card;
+	if (x->bitmap_seen) {
+		// A second bitmap goes with a second table, which is refused before
+		// this is reached; one more here is a root folder gone wrong.
+		return damaged(card, "the root folder names two bitmaps");
+	}
+	x->bitmap_seen = true;
+	x->bitmap_bytes = bytes;
+	if (bytes < ((uint64_t)card->clusters + 7) / 8) {
+		return damaged(card, "the bitmap is too small for the card");
+	}
+	uint64_t count = (bytes + card->cluster_bytes - 1) / card->cluster_bytes;
+	if (count == 0 || count > card->clusters) {
+		return damaged(card, "the bitmap has no sensible size");
+	}
+	x->bitmap_clusters = malloc((size_t)count * sizeof(uint32_t));
+	if (!x->bitmap_clusters) {
+		return failed(card, FATCHECK_NO_MEMORY, "no memory for the bitmap's place");
+	}
+	x_extent_t extent = {first, bytes, false};
+	x_walk_t walk;
+	x_walk_begin(&walk, card, &extent);
+	uint32_t c;
+	int more = 0;
+	while (x->bitmap_cluster_count < count && (more = x_walk_next(&walk, &c)) > 0) {
+		x->bitmap_clusters[x->bitmap_cluster_count++] = c;
+	}
+	if (more < 0) {
+		return false;
+	}
+	if (x->bitmap_cluster_count < count) {
+		return damaged(card, "the bitmap's chain is shorter than the bitmap");
+	}
+	// What the chain holds beyond the bitmap's size is still the bitmap's.
+	while ((more = x_walk_next(&walk, &c)) > 0) {
+	}
+	return more == 0;
+}
+
+// Reads one folder. Its entries come in sets: a file entry, then a stream
+// entry that says where the contents are, then the name. Only the first two
+// matter here. `root` is where the bitmap and the case table are named.
+static bool x_read_folder(xcard_t *x, const x_extent_t *folder, bool root) {
+	card_t *card = x->card;
+	uint32_t block = card->cluster_bytes < X_BLOCK_BYTES ? card->cluster_bytes : X_BLOCK_BYTES;
+	x_walk_t walk;
+	x_walk_begin(&walk, card, folder);
+
+	bool end = false;
+	bool have_file = false; // a file entry is waiting for its stream entry
+	bool is_folder = false;
+	uint32_t c;
+	int more;
+	while ((more = x_walk_next(&walk, &c)) > 0) {
+		// After the closing entry the rest is still the folder's, with
+		// nothing in it to read.
+		for (uint32_t at = 0; !end && at < card->cluster_bytes; at += block) {
+			off_t offset = card->data_start + (off_t)(c - 2) * card->cluster_bytes + at;
+			if (!read_at(card->fd, card->cluster, block, offset)) {
+				return failed(card, FATCHECK_IO, "a folder cannot be read");
+			}
+			for (uint32_t i = 0; !end && i + ENTRY_BYTES <= block; i += ENTRY_BYTES) {
+				const uint8_t *e = card->cluster + i;
+				uint8_t type = e[0];
+				if (type == X_ENTRY_END) {
+					end = true;
+				} else if (!(type & X_ENTRY_IN_USE)) {
+					have_file = false; // deleted, the whole set of it
+				} else if (type == X_ENTRY_FILE) {
+					if (have_file) {
+						return damaged(card, "a file entry has no stream entry after it");
+					}
+					have_file = true;
+					is_folder = le16(e + 4) & X_ATTR_FOLDER;
+				} else if (type == X_ENTRY_STREAM && have_file) {
+					have_file = false;
+					x_extent_t extent = {le32(e + 20), le64(e + 24), e[1] & X_STREAM_ONE_PIECE};
+					if (extent.first == 0 && extent.bytes != 0) {
+						return damaged(card, "a file of %llu bytes has no cluster", (unsigned long long)extent.bytes);
+					}
+					if (is_folder) {
+						card->out->folders++;
+						// A folder always has a cluster, if only for its
+						// closing entry.
+						if (extent.first == 0) {
+							return damaged(card, "a folder has no cluster");
+						}
+						if (!x_remember_folder(x, &extent)) {
+							return false;
+						}
+					} else {
+						card->out->files++;
+						if (extent.first != 0 && !x_take_file(card, &extent)) {
+							return false;
+						}
+					}
+				} else if (root && type == X_ENTRY_BITMAP) {
+					if (!x_take_bitmap(x, le32(e + 20), le64(e + 24))) {
+						return false;
+					}
+				} else if (root && type == X_ENTRY_UPCASE) {
+					x_extent_t extent = {le32(e + 20), le64(e + 24), false};
+					if (!x_take_file(card, &extent)) {
+						return false;
+					}
+				}
+				// Anything else is a name, the card's label, or a kind of
+				// entry that owns no clusters.
+			}
+		}
+	}
+	if (more < 0) {
+		return false;
+	}
+	if (have_file) {
+		return damaged(card, "a folder ends in the middle of an entry");
+	}
+	return true;
+}
+
+// The bitmap, read whole into memory. The caller frees it.
+static uint8_t *x_read_bitmap(xcard_t *x) {
+	card_t *card = x->card;
+	uint8_t *bitmap = malloc((size_t)x->bitmap_cluster_count * card->cluster_bytes);
+	if (!bitmap) {
+		failed(card, FATCHECK_NO_MEMORY, "no memory for the bitmap");
+		return NULL;
+	}
+	for (uint32_t k = 0; k < x->bitmap_cluster_count; k++) {
+		off_t offset = card->data_start + (off_t)(x->bitmap_clusters[k] - 2) * card->cluster_bytes;
+		if (!read_at(card->fd, bitmap + (size_t)k * card->cluster_bytes, card->cluster_bytes, offset)) {
+			free(bitmap);
+			failed(card, FATCHECK_IO, "the bitmap cannot be read");
+			return NULL;
+		}
+	}
+	return bitmap;
+}
+
+// The first sector of an exFAT volume. Fills in the same fields the FAT32
+// reader does, as far as they have a meaning here.
+static bool x_read_layout(card_t *card, const uint8_t *boot) {
+	uint64_t volume_sectors = le64(boot + 72);
+	uint32_t fat_sector = le32(boot + 80), fat_sectors = le32(boot + 84);
+	uint32_t heap_sector = le32(boot + 88);
+	uint32_t clusters = le32(boot + 92);
+	card->root_cluster = le32(boot + 96);
+	uint8_t sector_shift = boot[108], cluster_shift = boot[109], fats = boot[110];
+
+	if (sector_shift < 9 || sector_shift > 12 || cluster_shift > 25 - sector_shift) {
+		return damaged(card, "the first sector does not describe an exFAT volume");
+	}
+	// Two tables and two bitmaps is the transaction-safe variant, made for
+	// other devices than this one and never met on a card.
+	if (fats != 1) {
+		return failed(card, FATCHECK_UNSUPPORTED, "an exFAT volume with two tables");
+	}
+	card->sector_bytes = 1u << sector_shift;
+	uint64_t cluster_bytes = (uint64_t)card->sector_bytes << cluster_shift;
+	if (cluster_bytes > X_MAX_CLUSTER_BYTES) {
+		return failed(card, FATCHECK_UNSUPPORTED, "clusters larger than this reads");
+	}
+	card->cluster_bytes = (uint32_t)cluster_bytes;
+	card->fat_count = 1;
+	card->fat_sectors = fat_sectors;
+
+	uint64_t heap_end = (uint64_t)heap_sector + ((uint64_t)clusters << cluster_shift);
+	if (clusters == 0 || clusters > 0xFFFFFFF5u || fat_sector < 24 || heap_sector < fat_sector + fat_sectors || heap_end > volume_sectors || (uint64_t)fat_sectors * card->sector_bytes / 4 < (uint64_t)clusters + 2) {
+		return damaged(card, "the first sector's figures do not add up");
+	}
+	card->clusters = clusters;
+	card->fat_start = (off_t)fat_sector * card->sector_bytes;
+	card->data_start = (off_t)heap_sector * card->sector_bytes;
+
+	off_t device_bytes = lseek(card->fd, 0, SEEK_END);
+	if (device_bytes < 0 || (uint64_t)device_bytes < volume_sectors * card->sector_bytes) {
+		return damaged(card, "the volume is larger than the card");
+	}
+	if (!valid_cluster(card, card->root_cluster)) {
+		return damaged(card, "the root folder is nowhere");
+	}
+	return true;
+}
+
+// The whole check of an exFAT card, and the repair when it was asked for and
+// is allowed. Leaves the status and the counts in card->out.
+static bool x_check(card_t *card, const uint8_t *boot, bool repair, long expect_files, long expect_folders) {
+	fatcheck_result_t *out = card->out;
+	xcard_t x = {.card = card};
+	uint8_t *bitmap = NULL;
+
+	bool ok = x_read_layout(card, boot) && open_table(card);
+	if (ok) {
+		card->owned = calloc(((size_t)card->clusters + 2 + 7) / 8, 1);
+		card->cluster = malloc(card->cluster_bytes < X_BLOCK_BYTES ? card->cluster_bytes : X_BLOCK_BYTES);
+		if (!card->owned || !card->cluster) {
+			ok = failed(card, FATCHECK_NO_MEMORY, "no memory for the map of clusters");
+		}
+	}
+
+	// The root folder has no entry of its own to say how long it is: it is
+	// as long as its chain. The size here only has to be more than that.
+	if (ok) {
+		x_extent_t root = {card->root_cluster, (uint64_t)card->clusters * card->cluster_bytes, false};
+		ok = x_read_folder(&x, &root, true);
+	}
+	while (ok && x.folder_count > 0) {
+		x_extent_t folder = x.folders[--x.folder_count];
+		ok = x_read_folder(&x, &folder, false);
+	}
+	if (ok && !x.bitmap_seen) {
+		ok = damaged(card, "the root folder names no bitmap");
+	}
+	if (ok) {
+		bitmap = x_read_bitmap(&x);
+		ok = bitmap != NULL;
+	}
+
+	// The two books against each other. A cluster a file uses that the bitmap
+	// calls free is the dangerous way round: the next file written would be
+	// given it. That is damage, and nothing is freed beside it.
+	uint32_t lost = 0;
+	if (ok) {
+		for (uint32_t c = 2; ok && c < card->clusters + 2; c++) {
+			bool taken = bitmap[(c - 2) >> 3] & (1u << ((c - 2) & 7));
+			bool owned = is_owned(card, c);
+			if (owned && !taken) {
+				ok = damaged(card, "cluster %u holds a file and is marked free", (unsigned)c);
+			} else if (taken && !owned && x_fat_entry(card, c) != X_ENTRY_BAD) {
+				lost++;
+			}
+		}
+	}
+
+	if (ok) {
+		out->lost_clusters = lost;
+		out->lost_bytes = (uint64_t)lost * card->cluster_bytes;
+		out->status = lost ? FATCHECK_LOST : FATCHECK_CLEAN;
+
+		bool counted = expect_files >= 0 && expect_folders >= 0;
+		if (lost && repair && counted && ((uint32_t)expect_files != out->files || (uint32_t)expect_folders != out->folders)) {
+			out->status = FATCHECK_MISMATCH;
+			snprintf(out->problem, sizeof(out->problem), "read %u files in %u folders where the card showed %ld in %ld", (unsigned)out->files, (unsigned)out->folders, expect_files, expect_folders);
+		} else if (lost && repair) {
+			// The bits are cleared in the copy, and each cluster of the
+			// bitmap that changed is written back whole, as it was read.
+			for (uint32_t k = 0; ok && k < x.bitmap_cluster_count; k++) {
+				bool changed = false;
+				uint64_t first_bit = (uint64_t)k * card->cluster_bytes * 8;
+				for (uint64_t bit = first_bit; bit < first_bit + (uint64_t)card->cluster_bytes * 8 && bit < card->clusters; bit++) {
+					uint32_t c = (uint32_t)bit + 2;
+					bool taken = bitmap[bit >> 3] & (1u << (bit & 7));
+					if (taken && !is_owned(card, c) && x_fat_entry(card, c) != X_ENTRY_BAD) {
+						bitmap[bit >> 3] &= (uint8_t)~(1u << (bit & 7));
+						changed = true;
+					}
+				}
+				if (changed) {
+					off_t offset = card->data_start + (off_t)(x.bitmap_clusters[k] - 2) * card->cluster_bytes;
+					if (!write_at(card->fd, bitmap + (size_t)k * card->cluster_bytes, card->cluster_bytes, offset)) {
+						ok = failed(card, FATCHECK_IO, "writing the bitmap failed");
+					}
+				}
+			}
+			if (ok && fsync(card->fd) != 0) {
+				ok = failed(card, FATCHECK_IO, "writing the bitmap failed");
+			}
+			if (ok) {
+				out->repaired = true;
+			}
+		}
+	}
+
+	free(bitmap);
+	free(x.bitmap_clusters);
+	free(x.folders);
+	return ok;
+}
+
+// ---------------------------------------------------------------------------
+
+// The whole check of a FAT32 card, and the repair when it was asked for and
+// is allowed.
+static bool fat32_check(card_t *card, bool repair, long expect_files, long expect_folders) {
+	fatcheck_result_t *out = card->out;
+	bool ok = read_layout(card) && open_table(card);
+	if (ok) {
+		card->owned = calloc(((size_t)card->clusters + 2 + 7) / 8, 1);
+		card->cluster = malloc(card->cluster_bytes);
+		if (!card->owned || !card->cluster) {
+			ok = failed(card, FATCHECK_NO_MEMORY, "no memory for the map of clusters");
+		}
+	}
+	// The status is only a result once the whole tree has been read without
+	// finding fault: until then it is whatever stopped it.
+	ok = ok && tables_agree(card) && read_tree(card);
+	if (!ok) {
+		return false;
+	}
+
+	uint32_t lost = 0, free_clusters = 0;
+	find_lost(card, &lost, &free_clusters);
+	out->lost_clusters = lost;
+	out->lost_bytes = (uint64_t)lost * card->cluster_bytes;
+	out->status = lost ? FATCHECK_LOST : FATCHECK_CLEAN;
+
+	if (lost && repair) {
+		bool counted = expect_files >= 0 && expect_folders >= 0;
+		if (counted && ((uint32_t)expect_files != out->files || (uint32_t)expect_folders != out->folders)) {
+			out->status = FATCHECK_MISMATCH;
+			snprintf(out->problem, sizeof(out->problem), "read %u files in %u folders where the card showed %ld in %ld", (unsigned)out->files, (unsigned)out->folders, expect_files, expect_folders);
+		} else {
+			// The map is all that is needed from here on. The table is let
+			// go of before it is written, so that nothing here reads its
+			// own half-finished work.
+			close_table(card);
+			ok = free_lost(card, free_clusters + lost);
+			if (ok) {
+				out->repaired = true;
+			}
+		}
+	}
+	return ok;
+}
 
 bool fatcheck_run(const char *device, bool repair, long expect_files, long expect_folders, fatcheck_result_t *out) {
 	memset(out, 0, sizeof(*out));
@@ -544,41 +1008,16 @@ bool fatcheck_run(const char *device, bool repair, long expect_files, long expec
 		return false;
 	}
 
-	bool ok = read_layout(&card) && open_table(&card);
-	if (ok) {
-		card.owned = calloc(((size_t)card.clusters + 2 + 7) / 8, 1);
-		card.cluster = malloc(card.cluster_bytes);
-		if (!card.owned || !card.cluster) {
-			ok = failed(&card, FATCHECK_NO_MEMORY, "no memory for the map of clusters");
-		}
-	}
-	// The status is only a result once the whole tree has been read without
-	// finding fault: until then it is whatever stopped it.
-	ok = ok && tables_agree(&card) && read_tree(&card);
-
-	if (ok) {
-		uint32_t lost = 0, free_clusters = 0;
-		find_lost(&card, &lost, &free_clusters);
-		out->lost_clusters = lost;
-		out->lost_bytes = (uint64_t)lost * card.cluster_bytes;
-		out->status = lost ? FATCHECK_LOST : FATCHECK_CLEAN;
-
-		if (lost && repair) {
-			bool counted = expect_files >= 0 && expect_folders >= 0;
-			if (counted && ((uint32_t)expect_files != out->files || (uint32_t)expect_folders != out->folders)) {
-				out->status = FATCHECK_MISMATCH;
-				snprintf(out->problem, sizeof(out->problem), "read %u files in %u folders where the card showed %ld in %ld", (unsigned)out->files, (unsigned)out->folders, expect_files, expect_folders);
-			} else {
-				// The map is all that is needed from here on. The table is let
-				// go of before it is written, so that nothing here reads its
-				// own half-finished work.
-				close_table(&card);
-				ok = free_lost(&card, free_clusters + lost);
-				if (ok) {
-					out->repaired = true;
-				}
-			}
-		}
+	// exFAT names itself at the start of its first sector; everything else
+	// is for the FAT32 reader to take or to turn away.
+	uint8_t boot[512];
+	bool ok;
+	if (!read_at(card.fd, boot, sizeof(boot), 0)) {
+		ok = failed(&card, FATCHECK_IO, "the first sector cannot be read");
+	} else if (boot[510] == 0x55 && boot[511] == 0xAA && memcmp(boot + 3, "EXFAT   ", 8) == 0) {
+		ok = x_check(&card, boot, repair, expect_files, expect_folders);
+	} else {
+		ok = fat32_check(&card, repair, expect_files, expect_folders);
 	}
 
 	close_table(&card);
