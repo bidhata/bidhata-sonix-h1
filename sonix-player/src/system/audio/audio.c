@@ -1416,8 +1416,17 @@ static snd_pcm_t *open_pcm_device_now(int channels, int sample_rate, int bits_pe
 
 	int err = -EBUSY;
 	int attempts = 0;
-	int budget = (bluetooth && bluetooth_audio_active()) ? 160 : 40; // eight seconds, or two
+	const int base_budget = 40; // two seconds
+	int budget = (bluetooth && bluetooth_audio_active()) ? 160 : base_budget; // eight seconds, or two
 	for (; attempts < budget; attempts++) {
+		// The long wait is for a sink that is still there. Headphones that are
+		// switched off half way through it take the reason for waiting with
+		// them: once the radio says so, what is left is the ordinary two
+		// seconds, and the fallback below is not kept waiting for a sink that
+		// is not coming back.
+		if (budget > base_budget && attempts >= base_budget && !bluetooth_audio_active()) {
+			break;
+		}
 		err = convert_to ? open_bluetooth_at_rate(&pcm_handle, device, convert_to, mode)
 						 : snd_pcm_open(&pcm_handle, device, SND_PCM_STREAM_PLAYBACK, mode);
 		if (err >= 0) {
