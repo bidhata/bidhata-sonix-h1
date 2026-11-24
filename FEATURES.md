@@ -14,6 +14,14 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 - **CUE sheets** - a whole disc ripped into one file with a `.cue` next to it shows up as separate tracks.
 - **Tags in WAV and AIFF** are read too, cover included.
 
+## Supported video formats
+
+`.mp4` `.m4v` `.mkv` `.avi` `.mov` `.mpg` `.mpeg`
+
+- **Picture** - MPEG-4, H.264, MPEG-2 and MPEG-1, no larger than the screen. The player has no hardware decoder and does not scale, so films are converted on a computer first: see [VIDEO.md](VIDEO.md).
+- **Sound** - AAC, MP3, MP2, AC-3 and PCM.
+- **Subtitles** - SubRip (`.srt`) files beside the film.
+
 ## First start
 
 - Choose the language, then connect to Wi-Fi so the date and time are set by themselves. You can skip the Wi-Fi step.
@@ -158,8 +166,10 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 - **Metronome** - 30 to 250 BPM, up to 7 beats per bar, and tap tempo.
 - **Game Boy** (Gearboy) - plays Game Boy and Game Boy Color games, with their real names, save states, five palettes, shaders and color correction.
   > ROMs go in `Games/GB` and `Games/GBC`. The boot ROMs (optional) go in `Games/Bios`: `dmg_boot.bin` and `cgb_boot.bin`.
-- **Video** - plays videos from the `Video` folder of the card, turned sideways to fill the screen, with pause, 10-second skips and a progress bar you can drag or tap to go anywhere in the film. A film opens where it was left. **Subtitles** show when a `.srt` file with the film's name lies beside it (`Film.mp4` and `Film.srt`, or `Film.en.srt`).
+- **Video** - plays videos from the `Video` folder of the card, turned sideways to fill the screen, with pause, 10-second skips and a progress bar you can drag or tap to go anywhere in the film.
   > Videos have to be converted first: the player has no hardware decoder and does not scale. `tools/video-convert.sh` (on a computer, needs ffmpeg) makes an MPEG-4 `.mp4` no larger than the screen from anything ffmpeg reads. [VIDEO.md](VIDEO.md) has the details.
+- **Resume** - a film opens where it was left, a few seconds earlier. One left in its first half minute or in its credits starts from the beginning.
+- **Subtitles** - a film shows the lines of a `.srt` file with its name lying beside it: `Film.mp4` and `Film.srt`, or `Film.en.srt`. UTF-8 and Windows-1252 files are read. Subtitles stored inside the film are not shown; [VIDEO.md](VIDEO.md) says how to take them out into a file.
 - **Flappy Bird**, with sounds.
 
 ## Wireless
@@ -212,9 +222,13 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 ## System
 
 - **Date and time** - automatic over Wi-Fi (the time zone is found by itself) or set by hand, with 24-hour or AM/PM clock and daylight saving time.
-- **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Polski, Português BR, Čeština, Russian, Chinese and Japanese. Titles in Korean, Thai, Arabic and Hebrew are shown too, and so is Hindi (Devanagari), with its letters drawn one after another rather than joined as in print.
+- **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Polski, Português BR, Čeština, Russian, Chinese and Japanese.
+- **Other scripts** - titles and subtitles in Korean, Thai, Arabic, Hebrew and Hindi are shown as well. Hindi (Devanagari) has its letters drawn one after another rather than joined as in print.
 - **Firmware update** - over the internet with the full list of changes, or from a `.upt` file on the card.
 - **About** - device, serial number, card space and version.
-- **SD card** - a page for the card itself (Settings > System > SD card): how full it is, what it is formatted as, and whether it was taken out without being unmounted the last time. A **speed test** writes a 16 MB file, reads it back and checks it. **Check card** (FAT32 cards) reads the whole filesystem and looks for what an unsafe removal leaves behind; space held by data that belongs to no file it can free, after asking, and anything worse it reports and leaves for a computer. **Format card** erases the card and formats it as FAT32, after asking twice; it refuses while a game, a book, a video or a download still has a file open. Repairing damaged files and formatting as exFAT are done on a computer.
+- **SD card** - a page for the card itself (Settings > System > SD card): how full it is, what it is formatted as, and whether it was taken out without being unmounted the last time.
+- **Check card** - checks a FAT32 card without a computer. It reads the whole filesystem and looks for what an unsafe removal leaves behind. Space held by data that belongs to no file it frees, after asking; anything worse it reports and leaves for a computer. A card found whole loses its "Not removed safely" mark. Music stops while the card is checked.
+- **Speed test** - writes a 16 MB file to the card, reads it back and checks every byte, then shows both speeds.
+- **Format card** - erases the card and formats it as FAT32, after asking twice; it refuses while a game, a book, a video or a download still has a file open. Repairing damaged files and formatting as exFAT are done on a computer.
 - **Factory reset** - settings, Wi-Fi networks and Bluetooth devices are erased. The music on the card is not touched.
 - **Developer options** - tap "Build number" five times in About: ADB, log to the microSD, database log, Bluetooth log, and running processes and memory.
