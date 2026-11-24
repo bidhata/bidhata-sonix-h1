@@ -104,6 +104,47 @@ SYSTEM_INFO="usr/resource/sonix/components/system-info.json"
 STOCK_UI_DIRS=(usr/resource/litegui usr/resource/layout usr/resource/str usr/resource/fonts)
 
 # The working folders always go, whether the run succeeded or not.
+# drop_if_unnamed NAME PATH...
+#
+# Removes stock files from the image being built, but only when nothing else in
+# that image mentions them. NAME is looked for as plain text in every file,
+# programs and libraries included: a program linked against a library carries
+# the library's name, and so does one that loads it at run time or a script
+# that starts it. The files given are not counted against themselves, which
+# also covers a family of libraries that name each other.
+#
+# PATH is relative to the root of the image and may be the result of a glob
+# that matched nothing: what is not there is skipped.
+drop_if_unnamed() {
+	local name="$1"
+	shift
+	local present=() rel
+	for rel in "$@"; do
+		rel="${rel#"$SQUASH_DIR"/}"
+		if [ -e "$SQUASH_DIR/$rel" ] || [ -L "$SQUASH_DIR/$rel" ]; then
+			present+=("$rel")
+		fi
+	done
+	[ "${#present[@]}" -gt 0 ] || return 0
+
+	# -a: a program is searched like any other file. -F: the name is not a
+	# pattern. Symbolic links are not followed, so a link out of the image
+	# (etc/localtime is one) leads nowhere.
+	local users
+	users="$(cd "$SQUASH_DIR" && grep -rlaF -- "$name" . 2>/dev/null | sed 's|^\./||' || true)"
+	for rel in "${present[@]}"; do
+		users="$(printf '%s\n' "$users" | grep -vxF -- "$rel" || true)"
+	done
+	if [ -n "$users" ]; then
+		say "    $name kept: named in $(printf '%s' "$users" | head -n 3 | tr '\n' ' ')"
+		return 0
+	fi
+	for rel in "${present[@]}"; do
+		rm -f "$SQUASH_DIR/$rel"
+	done
+	say "    $name removed (${#present[@]} file(s)): nothing in the image names it"
+}
+
 cleanup() { rm -rf "$WORK_DIR" "$SQUASH_DIR" "$MERGED_SQUASHFS" 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -657,6 +698,28 @@ build_one() {
 			say "    usr/bin/bsa_server kept: something still names it"
 		fi
 	fi
+
+	# What HiBy's own player loaded and nothing else does: its decoders, which
+	# it opened by name at run time (this player has its own built in), the
+	# library it drew QR codes with, and libevent, which no program left in
+	# the image is linked against. And four Bluetooth tools nothing here
+	# starts: two for looking at traffic by hand, one for network-over-
+	# Bluetooth, and the file-transfer pair.
+	#
+	# Each goes through drop_if_unnamed, which looks for the name in every
+	# file of this very image before it removes anything. So nothing here
+	# rests on what one stock firmware happened to contain: on an image where
+	# something does use one of these, that one stays, and the log says why.
+	for lib in libwma.so libaac.so libmp3.so libvorbis.so libopus.so libdsd2pcm.so libqrencode.so; do
+		drop_if_unnamed "$lib" "usr/lib/$lib"
+	done
+	drop_if_unnamed "libevent" "$SQUASH_DIR"/usr/lib/libevent*
+	drop_if_unnamed "hcidump" usr/bin/hcidump
+	drop_if_unnamed "gatttool" usr/bin/gatttool
+	drop_if_unnamed "bt-network" usr/bin/bt-network
+	# bt-obex is the only thing that names obexd, so it is asked first.
+	drop_if_unnamed "bt-obex" usr/bin/bt-obex
+	drop_if_unnamed "obexd" usr/libexec/bluetooth/obexd
 	say ""
 
 	# ==========================================================================
