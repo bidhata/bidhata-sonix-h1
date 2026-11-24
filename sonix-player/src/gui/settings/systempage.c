@@ -7,6 +7,7 @@
 #include "lvgl/lvgl.h"
 
 #include "src/gui/shell/confirm.h"
+#include "src/gui/settings/cardpage.h"
 #include "src/gui/shell/easteregg.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/settings/fwupdate.h"
@@ -284,6 +285,9 @@ void systempage_init(gui_config_t *cfg) {
 	lv_obj_t *container = settingsrow_page(systempage_screen, cfg, "system");
 
 	settingsrow_add(container, "system_about", NULL, switch_screen_cb, sysinfo_screen);
+	// The card's own page: how full, what it is formatted as, a speed test,
+	// formatting it.
+	settingsrow_add(container, "system_sd_card", NULL, switch_screen_cb, cardpage_screen);
 	// Actions, not pages: settingsrow_action leaves off the chevron.
 	settingsrow_action(container, "system_update_firmware", firmware_clicked_cb, NULL);
 	settingsrow_action(container, "system_factory_reset", factory_clicked_cb, NULL);

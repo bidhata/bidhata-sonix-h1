@@ -667,6 +667,47 @@ static int mount_settled(const char *mount_point) {
 
 bool storage_sd_writable(void) { return sd_writable; }
 
+// Whether the card was taken out, or lost its power, without being unmounted
+// the time before: 1 yes, 0 no, -1 not known. Read from the filesystem's own
+// flag BEFORE the card is mounted, because that is the only moment it says
+// anything: FAT and exFAT both raise the flag for as long as the card is
+// mounted and lower it on a clean unmount, so on a mounted card it is always
+// up. A card somebody else mounted is therefore "not known".
+static int card_unclean = -1;
+
+int storage_card_unclean(void) { return card_unclean; }
+
+void storage_probe_unclean(const char *device) {
+	card_unclean = -1;
+	if (!device || !device[0]) {
+		return;
+	}
+	int fd = open(device, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return;
+	}
+	unsigned char boot[512];
+	ssize_t got = read(fd, boot, sizeof(boot));
+	close(fd);
+	// Both keep the 0x55AA signature at the end of their first sector.
+	if (got != (ssize_t)sizeof(boot) || boot[510] != 0x55 || boot[511] != 0xAA) {
+		return;
+	}
+	if (memcmp(boot + 3, "EXFAT   ", 8) == 0) {
+		// VolumeFlags, two bytes at 106, low byte first; bit 1 is VolumeDirty.
+		card_unclean = (boot[106] & 0x02) ? 1 : 0;
+	} else if (memcmp(boot + 82, "FAT32", 5) == 0) {
+		// FAT32 keeps the flag in the byte at 0x41, bit 0.
+		card_unclean = (boot[0x41] & 0x01) ? 1 : 0;
+	} else if (memcmp(boot + 54, "FAT1", 4) == 0) {
+		// FAT12 and FAT16, in the byte at 0x25.
+		card_unclean = (boot[0x25] & 0x01) ? 1 : 0;
+	}
+	if (card_unclean == 1) {
+		printf("storage: %s was not unmounted cleanly the last time\n", device);
+	}
+}
+
 static int mount_sd(storage_config_t *storage_cfg, const system_runtime_t *runtime) {
 	(void)runtime;
 
@@ -689,6 +730,7 @@ static int mount_sd(storage_config_t *storage_cfg, const system_runtime_t *runti
 	// the card is already there and must not be touched.
 	if (is_mounted(mount_point)) {
 		printf("storage: %s is already mounted, leaving it alone (%d entries)\n", mount_point, count_entries(mount_point));
+		card_unclean = -1; // mounted by somebody else: its flag says nothing now
 
 		// The block device must still be recorded: the USB mass-storage export
 		// needs it, and this early return is the common startup path (the card
@@ -719,6 +761,8 @@ static int mount_sd(storage_config_t *storage_cfg, const system_runtime_t *runti
 	mkdir(mount_point, 0755); // in case the mount point doesn't exist
 
 	printf("storage: mounting %s on %s\n", device, mount_point);
+	// Now or never: see storage_card_unclean().
+	storage_probe_unclean(device);
 
 	// mount(2) first: no other process involved, no protocol to get wrong, and
 	// it either works or returns an errno. Anything that talks to another daemon
@@ -1094,6 +1138,152 @@ void storage_release_for_shutdown(void) {
 	}
 
 	pthread_mutex_unlock(&card_lock);
+}
+
+// ---------------------------------------------------------------------------
+// Formatting the card
+//
+// Everything on the card is let go the way the USB export lets it go, the
+// card is unmounted, mkdosfs writes a new FAT32 filesystem on the device the
+// card was mounted from, and the card is mounted and everything opened again.
+//
+// The unmount is the plain one and its refusal is final: something still has
+// a file open (a game, a book, a download), and writing a filesystem under an
+// open file is not done. Everything is then opened again and the card is as
+// it was.
+//
+// card_lock is held throughout, so the supervisor and the hotplug thread wait.
+// The USB watcher does not take that lock: it and this stand off through two
+// flags, each raising its own before it looks at the other's (usb.c,
+// storage_export), so one of the two always gives way.
+// ---------------------------------------------------------------------------
+
+#define MKDOSFS_PATH "/sbin/mkdosfs"
+#define FORMAT_LABEL "SONIX"
+
+static volatile bool format_active;
+
+bool storage_format_active(void) { return format_active; }
+
+bool storage_format_supported(void) {
+	return g_storage_cfg && g_storage_cfg->manage_mount && !getenv("SONIX_NO_MOUNT") && access(MKDOSFS_PATH, X_OK) == 0;
+}
+
+// Runs mkdosfs on `device`. 0 when it succeeded.
+static int run_mkdosfs(const char *device) {
+	pid_t pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "storage: cannot start mkdosfs: %s\n", strerror(errno));
+		return -1;
+	}
+	if (pid == 0) {
+		// busybox's mkdosfs makes FAT32 and nothing else; -n is the label.
+		execl(MKDOSFS_PATH, "mkdosfs", "-n", FORMAT_LABEL, device, (char *)NULL);
+		_exit(127);
+	}
+	int status = 0;
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+	}
+	if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+		return 0;
+	}
+	fprintf(stderr, "storage: mkdosfs on %s failed (status 0x%x)\n", device, status);
+	return -1;
+}
+
+storage_format_result_t storage_format_card(void) {
+	if (!storage_format_supported()) {
+		return STORAGE_FORMAT_UNSUPPORTED;
+	}
+
+	pthread_mutex_lock(&card_lock);
+
+	// Raised before the other side's flag is read: see the note above.
+	format_active = true;
+	if (card_released || usb_storage_active() || !card_attached || !sd_root[0] || !is_mounted(sd_root) ||
+		!mount_is_alive(sd_root) || !sd_device_used[0]) {
+		format_active = false;
+		pthread_mutex_unlock(&card_lock);
+		return STORAGE_FORMAT_NO_CARD;
+	}
+
+	// The device the card is mounted from, and no other: copied now, since
+	// mount_sd() writes the same buffer again below.
+	char device[sizeof(sd_device_used)];
+	snprintf(device, sizeof(device), "%s", sd_device_used);
+	printf("storage: formatting %s (mounted on %s)\n", device, sd_root);
+
+	card_databases_detach();   // playback, the log, the library and audiobook databases
+	cover_set_cache_dir(NULL); // the thumbnail cache moves to /tmp
+	radio_store_close();
+	sync();
+
+	if (umount(sd_root) != 0) {
+		int busy = errno;
+		card_databases_attach(sd_root); // the log first of all, so that this is in it
+		fprintf(stderr, "storage: the card is in use (%s); not formatted\n", strerror(busy));
+		log_open_on_card();
+		format_active = false;
+		pthread_mutex_unlock(&card_lock);
+		return STORAGE_FORMAT_BUSY;
+	}
+
+	int made = run_mkdosfs(device);
+	sync();
+
+	// Mounted again whatever mkdosfs said: one that failed before writing has
+	// left the old filesystem whole. The node can take a moment to answer
+	// after the write, hence the tries.
+	bool mounted = false;
+	for (int attempt = 0; attempt < 10 && !mounted; attempt++) {
+		if (attempt) {
+			usleep(300 * 1000);
+		}
+		mounted = mount_sd(g_storage_cfg, g_runtime) == 0 && is_mounted(sd_root) && mount_is_alive(sd_root);
+	}
+	if (mounted) {
+		card_databases_attach(sd_root);
+	}
+	// Not mounted: the supervisor finds the card detached and keeps trying.
+
+	format_active = false;
+	pthread_mutex_unlock(&card_lock);
+
+	if (made != 0) {
+		return STORAGE_FORMAT_FAILED;
+	}
+	if (!mounted) {
+		fprintf(stderr, "storage: %s was formatted but would not mount again\n", device);
+		return STORAGE_FORMAT_NOT_MOUNTED;
+	}
+	printf("storage: %s formatted as FAT32 and mounted on %s\n", device, sd_root);
+	return STORAGE_FORMAT_OK;
+}
+
+bool storage_card_fstype(char *out, size_t out_size) {
+	if (!out || out_size == 0) {
+		return false;
+	}
+	out[0] = '\0';
+	char wanted[PATH_MAX];
+	if (!sd_root[0] || !realpath(sd_root, wanted)) {
+		return false;
+	}
+	FILE *f = fopen("/proc/mounts", "r");
+	if (!f) {
+		return false;
+	}
+	char device[256], point[PATH_MAX], type[64];
+	bool found = false;
+	// The last line for the mount point is the one on top.
+	while (fscanf(f, "%255s %4095s %63s %*[^\n]", device, point, type) == 3) {
+		if (strcmp(point, wanted) == 0) {
+			snprintf(out, out_size, "%s", type);
+			found = true;
+		}
+	}
+	fclose(f);
+	return found;
 }
 
 static void *card_supervisor_thread(void *arg) {

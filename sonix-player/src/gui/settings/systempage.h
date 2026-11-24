@@ -6,7 +6,8 @@
 #include "lvgl/lvgl.h"
 
 // The system page: everything about the device itself rather than how it sounds
-// or looks. It holds the information page, firmware update and factory reset.
+// or looks. It holds the information page, the card's page (cardpage.h),
+// firmware update and factory reset.
 extern lv_obj_t *systempage_screen;
 
 // The information page: the DAC, card space, the two version numbers.

@@ -4,6 +4,7 @@
 #include "src/system/device/ota.h"
 #include "src/system/device/power.h"
 #include "src/system/device/sysinfo.h"
+#include "src/system/device/system.h"
 
 #include <dirent.h>
 #include <limits.h>
@@ -718,6 +719,16 @@ static void storage_export(void) {
 	// snapshot of the filesystem.
 	storage_active = true;
 
+	// A card being formatted is not handed over: its filesystem is being
+	// written this very moment. Looked at after this side's own flag is up,
+	// as the format looks at this flag after raising its own, so that one of
+	// the two always gives way (system.c, storage_format_card).
+	if (storage_format_active()) {
+		fprintf(stderr, "usb: the card is being formatted; not exported\n");
+		storage_active = false;
+		return;
+	}
+
 	// Playback reads from the card; the library and the audiobook index hold
 	// open databases on it; the log usually *is* on it -- and an open
 	// descriptor makes the unmount fail. Release everything before trying.
@@ -855,6 +866,9 @@ static void storage_restore(void) {
 			(void)urc;
 		}
 	}
+
+	// What the computer left behind, read while nothing is mounted.
+	storage_probe_unclean(sd_device);
 
 	// Mount it back, and check rather than hope: a remount that fails silently
 	// leaves the player with no card until a reboot. Try the daemon, then the
@@ -1087,6 +1101,10 @@ static void *usb_thread(void *arg) {
 		// A firmware image being downloaded is being written to the card: it
 		// is offered to the host once the download has ended.
 		if (ota_busy()) {
+			continue;
+		}
+		// And so is a card being formatted, once that is over.
+		if (storage_format_active()) {
 			continue;
 		}
 

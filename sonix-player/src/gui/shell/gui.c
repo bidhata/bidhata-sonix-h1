@@ -77,6 +77,7 @@
 #include "src/gui/streaming/radiopage.h"
 #include "src/gui/library/search.h"
 #include "src/gui/settings/settings.h"
+#include "src/gui/settings/cardpage.h"
 #include "src/gui/settings/systempage.h"
 #include "src/gui/shell/setupwifi.h"
 #include "src/gui/shell/welcome.h"
@@ -635,6 +636,7 @@ void gui_init(gui_config_t *cfg) {
 	devoptions_screen = lv_obj_create(NULL);
 	processespage_screen = lv_obj_create(NULL);
 	systempage_screen = lv_obj_create(NULL);
+	cardpage_screen = lv_obj_create(NULL);
 	sysinfo_screen = lv_obj_create(NULL);
 	libraryscan_screen = lv_obj_create(NULL);
 	musicsettings_screen = lv_obj_create(NULL);
@@ -754,6 +756,7 @@ void gui_init(gui_config_t *cfg) {
 	devoptions_init(cfg);
 	processespage_init(cfg); // the processes page the devoptions entry opens
 	// after devoptions: the system entry opens the page that can unlock it
+	cardpage_init(cfg); // before the system page: one of its rows leads here
 	systempage_init(cfg);
 	bootlogopage_init(cfg); // before appearance: its row carries the screen
 	appearance_init(cfg);

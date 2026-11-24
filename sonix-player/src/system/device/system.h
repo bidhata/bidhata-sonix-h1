@@ -1,6 +1,7 @@
 #ifndef SYSTEM_H
 #define SYSTEM_H
 
+#include <stddef.h>
 #include <stdbool.h>
 
 typedef struct {
@@ -84,6 +85,45 @@ bool storage_card_attached(void);
 // names the mount point even with nothing mounted on it, and a file written
 // there then lands on the internal flash.
 bool storage_card_usable(void);
+
+// Whether the card was not unmounted cleanly the time before this mount: 1
+// yes, 0 no, -1 not known (no card, a filesystem that keeps no such flag, or a
+// card this player did not mount itself). Decided before each mount, which is
+// the only moment the flag on the card says anything.
+int storage_card_unclean(void);
+
+// Reads that flag from `device`, which must not be mounted. mount_sd() does it
+// by itself; this is for the one other place that mounts the card, the USB
+// export handing it back (usb.c).
+void storage_probe_unclean(const char *device);
+
+// The filesystem the card is mounted as, the kernel's name for it ("vfat",
+// "exfat", "fuseblk" for ntfs-3g). False, with an empty string, when nothing
+// is mounted on the card's root.
+bool storage_card_fstype(char *out, size_t out_size);
+
+// Formatting the card as FAT32, which is the one filesystem the device has a
+// tool to make.
+typedef enum {
+	STORAGE_FORMAT_OK,
+	STORAGE_FORMAT_UNSUPPORTED, // no mkdosfs, or a card this player does not mount itself (the simulator)
+	STORAGE_FORMAT_NO_CARD,		// no card, or it is with a computer over USB
+	STORAGE_FORMAT_BUSY,		// something has a file open on it; nothing was changed
+	STORAGE_FORMAT_FAILED,		// mkdosfs failed; the card is mounted again if it still can be
+	STORAGE_FORMAT_NOT_MOUNTED, // formatted, but it would not mount afterwards
+} storage_format_result_t;
+
+bool storage_format_supported(void);
+
+// Erases the card. Stops playback, closes everything the player keeps on the
+// card, unmounts it, formats it, mounts it and opens everything again on the
+// empty card. Blocks for as long as that takes (seconds): never on the UI
+// thread. Any thread otherwise.
+storage_format_result_t storage_format_card(void);
+
+// True while storage_format_card() has the card. The USB watcher does not
+// offer the card to a computer meanwhile.
+bool storage_format_active(void);
 
 // Reopens whichever of the card's databases -- music, audiobooks, radio,
 // podcasts, thumbnails -- was deleted or replaced since it was opened. Called

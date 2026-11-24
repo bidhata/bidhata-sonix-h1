@@ -215,5 +215,6 @@ This is everything Bidhata Sonix Player can do today, on both the **R1** and the
 - **Languages** - English, Italiano, Deutsch, Español, Français, Nederlands, Polski, Português BR, Čeština, Russian, Chinese and Japanese. Titles in Korean, Thai and Arabic are shown too.
 - **Firmware update** - over the internet with the full list of changes, or from a `.upt` file on the card.
 - **About** - device, serial number, card space and version.
+- **SD card** - a page for the card itself (Settings > System > SD card): how full it is, what it is formatted as, and whether it was taken out without being unmounted the last time. A **speed test** writes a 16 MB file, reads it back and checks it. **Format card** erases the card and formats it as FAT32, after asking twice; it refuses while a game, a book, a video or a download still has a file open. Checking a card for errors and formatting as exFAT are done on a computer: the player has no tool for either.
 - **Factory reset** - settings, Wi-Fi networks and Bluetooth devices are erased. The music on the card is not touched.
 - **Developer options** - tap "Build number" five times in About: ADB, log to the microSD, database log, Bluetooth log, and running processes and memory.
