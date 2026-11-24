@@ -1472,9 +1472,14 @@ static void fb_pan_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *
 	if (lv_display_flush_is_last(disp)) {
 		fb_var.yoffset = second_page ? fb_var.yres : 0;
 		if (ioctl(fb_fd, FBIOPAN_DISPLAY, &fb_var) < 0) {
-			// One warning, not one per frame.
+			// EBUSY is the driver saying the panel is blanked, and that is
+			// how the wake goes: power.c draws what changed in the dark
+			// before it turns the panel on, so that frame's pan is always
+			// refused. Nothing is lost by it. yoffset already names the page
+			// just drawn, and display_wake_begin() pans to it once the panel
+			// is up. Anything else is worth a line: one, not one per frame.
 			static bool warned;
-			if (!warned) {
+			if (errno != EBUSY && !warned) {
 				perror("fb: FBIOPAN_DISPLAY");
 				warned = true;
 			}
