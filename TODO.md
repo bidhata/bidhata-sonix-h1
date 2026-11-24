@@ -59,7 +59,7 @@ Work done on 2026-11-24 sits on the local branch `merge-upstream-prs`: upstream 
 - [x] OTA: `ota-repo` in both `system-info.json` files now names this fork (`bidhata/bidhata-sonix-h1`), so an internet update no longer installs upstream's image. The fork has no releases yet. Still open: images are checked by size only when the release has no digest.
 - [ ] Last.fm: the account owning the API key needs Pro from 2026-12-01.
 - [ ] PR #37 brings a `docs/` folder, which the PR template forbids. Licence of the Hebrew fonts from PR #18 is unchecked.
-- [ ] README and the packer's header still say `kernel/xImage-<MODEL>` is optional; with the overlay's modules it no longer is.
+- [ ] `readme-old.md` and the packer's header still say `kernel/xImage-<MODEL>` is optional; with the overlay's modules it no longer is.
 - [ ] How to split the uncommitted work into commits (audit fixes, Last.fm, each feature).
 
 ## Known gaps, not fixed
