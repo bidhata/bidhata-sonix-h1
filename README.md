@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="sonix-packer/assets/R1/etc/boot-logo/dark-theme-blue.jpeg" width="240" alt="Bidhata's SonixOS boot screen">
+<img src="sonix-packer/assets/R1/etc/boot-logo/dark-theme-blue.jpeg" width="240" alt="Bidhata's Modded SonixOS boot screen">
 
-# Bidhata's SonixOS Mod
+# Bidhata's Modded SonixOS
 
-**For Your HiBy R1 and R3 Pro II, rebuilt ~~from the ground up~~ with few mods I liked for my own device .  **
+**For your HiBy R1 and R3 Pro II, rebuilt ~~from the ground up~~ with a few mods I liked for my own device.**
 
 Open-source firmware that turns a pocket music player into the one you wished it shipped as:<br>
 every format, real streaming, video, a VU meter that moves with the music, and nothing you cannot change.
@@ -55,7 +55,7 @@ every format, real streaming, video, a VU meter that moves with the music, and n
 
 ## Why
 
-The HiBy R1 costs less than a pair of decent earphones and has a good DAC in it. The software it ships with does not do it justice. Bidhata's SonixOS replaces the whole player: the interface, the audio chain, the Bluetooth stack, even the drivers. One binary, written in C on LVGL, runs on both players.
+The HiBy R1 costs less than a pair of decent earphones and has a good DAC in it. The software it ships with does not do it justice. Bidhata's Modded SonixOS replaces the whole player: the interface, the audio chain, the Bluetooth stack, even the drivers. One binary, written in C on LVGL, runs on both players.
 
 It is a fork of [Sonix Player](https://github.com/Tartarus6/sonix-player) by Tartarus6, itself the successor to M4ttia's Sonix. Everything good underneath is theirs. This fork adds the things below.
 

@@ -1,5 +1,5 @@
 <!--
-Thanks for contributing to Bidhata Sonix Player!
+Thanks for contributing to Bidhata's Modded SonixOS!
 
 Read the whole checklist BEFORE opening the PR. A PR that skips it is closed
 or sent back without a full review. Every box must be ticked, or answered

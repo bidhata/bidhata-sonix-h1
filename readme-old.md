@@ -1,4 +1,4 @@
-# Bidhata Sonix Player
+# Bidhata's Modded SonixOS
 
 > [!Note]
 > A fork of [Tartarus6/sonix-player](https://github.com/Tartarus6/sonix-player), which is the
@@ -23,12 +23,12 @@ Everything it can do is in **[FEATURES.md](FEATURES.md)**.
 4. Start the update:
    - **from the stock firmware** - use its firmware update from the microSD
      card.
-   - **from Bidhata Sonix Player** - Settings > System > Update firmware > From SD
+   - **from Bidhata's Modded SonixOS** - Settings > System > Update firmware > From SD
      card.
 5. Let it flash: it says "Upgrading...", then "Succeeded", and reboots by
    itself.
 
-Once Bidhata Sonix Player is installed, later versions can be installed straight from
+Once Bidhata's Modded SonixOS is installed, later versions can be installed straight from
 the player: Settings > System > Update firmware > Via internet downloads the
 right file from the latest release by itself.
 
@@ -462,7 +462,7 @@ the overlay - any other file need to be in the respective folder mirroring the r
 3. Start the update:
    - **from the stock firmware** - use its firmware update from the microSD
      card.
-   - **from Bidhata Sonix Player** - Settings > System > Update firmware > From SD
+   - **from Bidhata's Modded SonixOS** - Settings > System > Update firmware > From SD
      card. *Via internet* downloads the right image from the latest release by
      itself.
 4. Let it flash - it will say "Upgrading..." then "Succeeded" and reboot by itself.
@@ -536,11 +536,11 @@ sonix-player/
 │   │   ├── R3PII/                   the R3 Pro II overlay
 │   │   │   ├── etc/                 boot logos (480x720), start scripts, D-Bus policy, cert.pem
 │   │   │   ├── module_driver/       the open-source modules, gt9xx_touch.ko among them; gt9xx_touch.sh for five fingers and leds_sgm31324_add.sh with 3 added LED registers
-│   │   │   └── usr/                 bluealsa 4.3.1, resources required by Bidhata Sonix Player
+│   │   │   └── usr/                 bluealsa 4.3.1, resources required by Bidhata's Modded SonixOS
 │   │   └── R1/                      the R1 overlay
 │   │       ├── etc/                 boot logos (480x800), start scripts, D-Bus policy, cert.pem
 │   │       ├── module_driver/       the open-source modules, cst8xx_touch.ko among them; cst8xx_touch.sh for two fingers
-│   │       └── usr/                 bluealsa 4.3.1, resources required by Bidhata Sonix Player
+│   │       └── usr/                 bluealsa 4.3.1, resources required by Bidhata's Modded SonixOS
 │   │                                
 │   ├── kernel/                      xImage-R3PII and xImage-R1, from hiby-custom-kernel
 │   └── sonix_firmware_packer.sh     

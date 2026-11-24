@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Builds HiByOS firmware images that boot Bidhata Sonix Player instead of the stock
+# Builds HiByOS firmware images that boot Bidhata's Modded SonixOS instead of the stock
 # music player -- one per model, from one binary and one set of assets.
 #
 # Everything it needs sits next to it:

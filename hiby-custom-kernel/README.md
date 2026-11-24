@@ -1,7 +1,7 @@
 # Linux 4.4.94+ for HiBy X1600 players
 
 > [!NOTE]
-> This folder is a copy of [Tartarus6/hiby-custom-kernel](https://github.com/Tartarus6/hiby-custom-kernel), kept inside the Bidhata's SonixOS repository so that the player and the kernel it runs on travel together. The kit is Tartarus6's work and keeps its own licence (GPL-2.0, see `LICENSE` here).
+> This folder is a copy of [Tartarus6/hiby-custom-kernel](https://github.com/Tartarus6/hiby-custom-kernel), kept inside the Bidhata's Modded SonixOS repository so that the player and the kernel it runs on travel together. The kit is Tartarus6's work and keeps its own licence (GPL-2.0, see `LICENSE` here).
 >
 > Two things differ from upstream. The stock firmware image upstream keeps in its tree is not included: bring your own. And nine module sources carry changes from an audit of the player (`mp2731`, `soc_pwm`, `sa_hgl_dma`, `gt9xx_touch`, `cw2015`, `soc_aic`, `codec_cs43198_dual` and both sound cards). **Those changes have never been compiled or run**: the firmware images are built with upstream's kernel and modules, in `sonix-packer/kernel` and `sonix-packer/assets`.
 

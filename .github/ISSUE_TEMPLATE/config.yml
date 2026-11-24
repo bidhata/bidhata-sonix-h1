@@ -2,4 +2,4 @@ blank_issues_enabled: false
 contact_links:
   - name: Feature list
     url: https://github.com/bidhata/bidhata-sonix-h1/blob/main/FEATURES.md
-    about: Everything Bidhata Sonix Player can do today. If something is not in this list, it is a feature request, not a bug.
+    about: Everything Bidhata's Modded SonixOS can do today. If something is not in this list, it is a feature request, not a bug.

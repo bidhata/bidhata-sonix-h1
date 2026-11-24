@@ -1,8 +1,8 @@
 # Features
 
-This is everything Bidhata Sonix Player can do today, on both the **R1** and the **R3 Pro II** unless it says otherwise.
+This is everything Bidhata's Modded SonixOS can do today, on both the **R1** and the **R3 Pro II** unless it says otherwise.
 
-> If something is not on this page, Bidhata Sonix Player does not do it yet. It is not a bug: open a **Feature request**.
+> If something is not on this page, Bidhata's Modded SonixOS does not do it yet. It is not a bug: open a **Feature request**.
 
 ---
 
