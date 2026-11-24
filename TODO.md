@@ -54,7 +54,7 @@ Work done on 2026-11-24 sits on the local branch `merge-upstream-prs`: upstream 
 - [ ] SonixLink has no password, listens on every interface and starts at boot.
 - [ ] The Bluetooth agent accepts any pairing request without asking.
 - [ ] The Wi-Fi transfer server runs as root with no authentication while its page is open.
-- [x] OTA: `ota-repo` in both `system-info.json` files now names this fork (`bidhata/bidhata-sonix-player`), so an internet update no longer installs upstream's image. The fork has no releases yet. Still open: images are checked by size only when the release has no digest.
+- [x] OTA: `ota-repo` in both `system-info.json` files now names this fork (`bidhata/bidhata-sonix-h1`), so an internet update no longer installs upstream's image. The fork has no releases yet. Still open: images are checked by size only when the release has no digest.
 - [ ] Last.fm: the account owning the API key needs Pro from 2026-12-01.
 - [ ] PR #37 brings a `docs/` folder, which the PR template forbids. Licence of the Hebrew fonts from PR #18 is unchecked.
 - [ ] README and the packer's header still say `kernel/xImage-<MODEL>` is optional; with the overlay's modules it no longer is.

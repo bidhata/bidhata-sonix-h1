@@ -1,9 +1,10 @@
-﻿# Sonix Player
+# Bidhata Sonix Player
 
 > [!Note]
-> THIS IS THE SUCCESSOR TO M4ttia's SONIX REPO
-> 
-> Huge thanks for Jepl4r/M4ttia for being the one to start this project!
+> A fork of [Tartarus6/sonix-player](https://github.com/Tartarus6/sonix-player), which is the
+> successor to M4ttia's Sonix repo.
+>
+> Huge thanks to Jepl4r/M4ttia for starting the project, and to Tartarus6 for carrying it on.
 
 A replacement player for the **HiBy R3 Pro II** and the **HiBy R1**, written on
 LVGL.
@@ -13,7 +14,7 @@ Everything it can do is in **[FEATURES.md](FEATURES.md)**.
 ## Install
 
 1. Download the firmware for your player from the
-   **[latest release](https://github.com/Tartarus6/sonix-player/releases/latest)**:
+   **[latest release](https://github.com/bidhata/bidhata-sonix-h1/releases/latest)**:
    `r3proii.upt` for the R3 Pro II, `r1.upt` for the R1. **Never the other
    one**: the update does not check which player it is given.
 2. Charge the player **above 30%**.
@@ -22,12 +23,12 @@ Everything it can do is in **[FEATURES.md](FEATURES.md)**.
 4. Start the update:
    - **from the stock firmware** - use its firmware update from the microSD
      card.
-   - **from Sonix Player** - Settings > System > Update firmware > From SD
+   - **from Bidhata Sonix Player** - Settings > System > Update firmware > From SD
      card.
 5. Let it flash: it says "Upgrading...", then "Succeeded", and reboots by
    itself.
 
-Once Sonix Player is installed, later versions can be installed straight from
+Once Bidhata Sonix Player is installed, later versions can be installed straight from
 the player: Settings > System > Update firmware > Via internet downloads the
 right file from the latest release by itself.
 
@@ -435,7 +436,7 @@ the overlay - any other file need to be in the respective folder mirroring the r
 3. Start the update:
    - **from the stock firmware** - use its firmware update from the microSD
      card.
-   - **from Sonix Player** - Settings > System > Update firmware > From SD
+   - **from Bidhata Sonix Player** - Settings > System > Update firmware > From SD
      card. *Via internet* downloads the right image from the latest release by
      itself.
 4. Let it flash - it will say "Upgrading..." then "Succeeded" and reboot by itself.
@@ -490,11 +491,11 @@ sonix-player/
 │   │   ├── R3PII/                   the R3 Pro II overlay
 │   │   │   ├── etc/                 boot logos (480x720), start scripts, D-Bus policy, cert.pem
 │   │   │   ├── module_driver/       the open-source modules, gt9xx_touch.ko among them; gt9xx_touch.sh for five fingers and leds_sgm31324_add.sh with 3 added LED registers
-│   │   │   └── usr/                 bluealsa 4.3.1, resources required by Sonix Player
+│   │   │   └── usr/                 bluealsa 4.3.1, resources required by Bidhata Sonix Player
 │   │   └── R1/                      the R1 overlay
 │   │       ├── etc/                 boot logos (480x800), start scripts, D-Bus policy, cert.pem
 │   │       ├── module_driver/       the open-source modules, cst8xx_touch.ko among them; cst8xx_touch.sh for two fingers
-│   │       └── usr/                 bluealsa 4.3.1, resources required by Sonix Player
+│   │       └── usr/                 bluealsa 4.3.1, resources required by Bidhata Sonix Player
 │   │                                
 │   ├── kernel/                      xImage-R3PII and xImage-R1, from hiby-custom-kernel
 │   └── sonix_firmware_packer.sh     

@@ -1,6 +1,6 @@
 # Video
 
-Sonix Player plays videos from the `Video` folder of the card (More > Video).
+Bidhata Sonix Player plays videos from the `Video` folder of the card (More > Video).
 It decodes in software on a small processor and does not scale the picture, so
 a video has to be **converted for the player's screen first**, on a computer.
 This page is how.

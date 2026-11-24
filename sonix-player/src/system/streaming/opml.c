@@ -332,7 +332,7 @@ bool opml_write(const char *path, const opml_feed_t *feeds, int count) {
 	}
 	fputs("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", f);
 	fputs("<opml version=\"2.0\">\n", f);
-	fputs("  <head>\n    <title>Sonix Player</title>\n  </head>\n", f);
+	fputs("  <head>\n    <title>Bidhata Sonix Player</title>\n  </head>\n", f);
 	fputs("  <body>\n", f);
 	for (int i = 0; i < count; i++) {
 		fputs("    <outline type=\"rss\" text=\"", f);
