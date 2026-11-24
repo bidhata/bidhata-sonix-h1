@@ -92,7 +92,6 @@ All of this is Sonix Player's own work and came with it. The fork's part in it i
 | 🇮🇳 **Hindi text** | Titles and subtitles in Devanagari, drawn letter by letter. |
 | 🔒 **SonixLink off at start** | It has no password, so it no longer stays on by itself. |
 | ⏲️ **Longer auto power-off** | From 15 minutes up to 48 hours. |
-| 🛠️ **A full audit** | Fixes across audio, decoders, the library, streaming, Bluetooth, USB and power. |
 | 🧪 **Tests and builds** | Every audio format is decoded and checked before a release, and both images are built on GitHub from the source you see here. The kernel build kit lives in this repository. |
 
 Three more features come from pull requests that other people opened on Sonix Player and that are merged here: SACD ISO playback and the custom accent colour picker by CookieCaptainD, and Hebrew text by Dazrok.
