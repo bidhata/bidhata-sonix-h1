@@ -363,12 +363,11 @@ bool sonixlink_get_enabled(void) {
 	return on;
 }
 
+// Not written to the configuration: see sonixlink.h.
 void sonixlink_set_enabled(bool on) {
 	pthread_mutex_lock(&lock);
 	enabled = on;
 	pthread_mutex_unlock(&lock);
-	config_set_int("wireless", "sonixlink", on ? 1 : 0);
-	config_save();
 }
 
 // ---------------------------------------------------------------------------
@@ -3232,9 +3231,17 @@ void sonixlink_init(void) {
 		clients[i].fd = -1;
 	}
 
+	// Off, always. Older versions kept the switch in the configuration and
+	// came up with SonixLink listening if it had been left on; a setting left
+	// behind by one of them is cleared, so that the file does not say what is
+	// no longer true.
 	pthread_mutex_lock(&lock);
-	enabled = config_get_int("wireless", "sonixlink", 0) != 0;
+	enabled = false;
 	pthread_mutex_unlock(&lock);
+	if (config_get_int("wireless", "sonixlink", 0) != 0) {
+		config_set_int("wireless", "sonixlink", 0);
+		config_save();
+	}
 	verbose = config_get_int("wireless", "sonixlink_log", 0) != 0;
 
 	if (pthread_create(&worker, NULL, sonixlink_worker, NULL) != 0) {

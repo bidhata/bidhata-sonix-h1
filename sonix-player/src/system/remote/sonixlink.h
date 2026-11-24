@@ -226,7 +226,10 @@ void sonixlink_command_free(sonixlink_command_t *cmd);
 // Starts the worker. It sits idle until the switch is on.
 void sonixlink_init(void);
 
-// The switch, remembered across reboots in [wireless] sonixlink.
+// The switch. Off at every start, whatever it was when the player went down:
+// SonixLink answers anyone who can reach the player, with no password, so it
+// runs while its owner has asked for it in this session and not for ever
+// after because it was once switched on.
 bool sonixlink_get_enabled(void);
 void sonixlink_set_enabled(bool on);
 
