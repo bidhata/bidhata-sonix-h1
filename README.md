@@ -57,7 +57,24 @@ every format, real streaming, video, a VU meter that moves with the music, and n
 
 The HiBy R1 costs less than a pair of decent earphones and has a good DAC in it. The software it ships with does not do it justice. Bidhata's Modded SonixOS replaces the whole player: the interface, the audio chain, the Bluetooth stack, even the drivers. One binary, written in C on LVGL, runs on both players.
 
-It is a fork of [Sonix Player](https://github.com/Tartarus6/sonix-player) by Tartarus6, itself the successor to M4ttia's Sonix. Everything good underneath is theirs. This fork adds the things below.
+It is a fork of [Sonix Player](https://github.com/Tartarus6/sonix-player) by Tartarus6, itself the successor to M4ttia's Sonix. Everything good underneath is theirs. The two lists below say which is which: what Sonix Player already did before this fork, and what the fork put on top.
+
+## What was already there
+
+All of this is Sonix Player's own work and came with it. The fork's part in it is bug fixes.
+
+| | |
+|---|---|
+| 🎵 **Every audio format** | FLAC, MP3, Ogg, Opus, AAC, ALAC, WavPack, APE, AIFF, WAV and native DSD, with CUE sheets, gapless playback, fade and ReplayGain. |
+| 📚 **The library** | Albums, artists, genres, years, favourites, most played, folders, search, sorting in every alphabet, playlists with `.m3u` import and export, and the queue with its history. |
+| 🎚️ **Now Playing** | Three layouts, the waveform bar, cover colours, Cover Flow, and lyrics from tags, `.lrc` files or LRCLIB. |
+| 🎛️ **The sound chain** | Graphic and parametric EQ, AutoEq, MSEB, soundfield, crossfeed, balance, the DAC's filters, per-output volume, line out, USB DAC in both directions. |
+| 📡 **Streaming** | Tidal, Qobuz, internet radio, Last.fm scrobbling, podcasts with downloads and OPML. |
+| 📖 **Books** | Audiobooks with chapters, speed and bookmarks, and the e-book reader. |
+| 📶 **Wireless** | Wi-Fi, Bluetooth out and in, AirPods battery and noise control, AirPlay, DLNA, Wi-Fi transfer, SonixLink, USB storage. |
+| 🎮 **Extras** | File manager, metronome, Game Boy emulator, Flappy Bird. |
+| 🎨 **The interface** | Themes, accent colours, dynamic tint, the control centre, button remapping, keyboards in eleven layouts, twelve languages, the screensaver and boot logos. |
+| 🔋 **The system** | Standby, charge limit, the battery screen, updates over the internet or from the card, the firmware packer, and the open drivers and kernel. |
 
 ## What this fork adds
 
@@ -67,13 +84,18 @@ It is a fork of [Sonix Player](https://github.com/Tartarus6/sonix-player) by Tar
 | 📊 **VU meter, three ways** | Two bars, two needle dials or a ten-band spectrum on Now Playing. Tap to switch. It follows the sound you hear, not the sound just sent to the output. |
 | 🔑 **Bring your own API keys** | No keys in the firmware? Drop a `streaming-keys.ini` on the card and Last.fm and the podcast catalogue come alive. |
 | 📱 **Last.fm by QR code** | Scan, approve on your phone, done. No password typed on a tiny screen. |
-| ⏱️ **Track lengths everywhere** | In every list, in search, and as an album's running time. |
+| ⏱️ **Track lengths everywhere** | In every list, in search, and as an album's running time. A long press scrolls a title that is cut off. |
 | 🌙 **Auto sleep timer** | A nightly window in which playback stops by itself. |
 | ⏪ **Jump back and forward** | On remapped buttons and on the wired remote. |
-| 💾 **SD card page** | How full, what format, whether it was pulled out unsafely, a check that frees space lost to an interrupted write, a speed test that verifies what it reads back, and Format. |
+| 🎙️ **Podcast details** | An episode's full title, date and length, and mark a whole podcast as heard or not heard. |
+| 💾 **SD card page** | How full, what format, whether it was pulled out unsafely, a check that frees space lost to an interrupted write on FAT32 and exFAT cards, a speed test that verifies what it reads back, and Format. |
+| 🇮🇳 **Hindi text** | Titles and subtitles in Devanagari, drawn letter by letter. |
+| 🔒 **SonixLink off at start** | It has no password, so it no longer stays on by itself. |
+| ⏲️ **Longer auto power-off** | From 15 minutes up to 48 hours. |
 | 🛠️ **A full audit** | Fixes across audio, decoders, the library, streaming, Bluetooth, USB and power. |
+| 🧪 **Tests and builds** | Every audio format is decoded and checked before a release, and both images are built on GitHub from the source you see here. The kernel build kit lives in this repository. |
 
-Upstream's own additions are merged too: SACD ISO playback, a custom accent colour picker, and Hebrew text.
+Three more features come from pull requests that other people opened on Sonix Player and that are merged here: SACD ISO playback and the custom accent colour picker by CookieCaptainD, and Hebrew text by Dazrok.
 
 ## Everything it does
 
