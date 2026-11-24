@@ -1,0 +1,249 @@
+name: Firmware release
+
+# Builds the player for the device, packs one firmware image per player and
+# publishes them as a GitHub release.
+#
+#   a push to main      -> a PRE-release tagged build-<date>-<run>. The player's
+#                          own "update over the internet" skips pre-releases, so
+#                          these reach nobody who did not go and fetch one.
+#   a pushed tag v1.2.3 -> a full release. Its number is written into both
+#                          images as their OS version, and it is what players
+#                          are offered as an update. Tag only what has been run
+#                          on a device.
+#   run by hand         -> the same as a push to the branch it is run on.
+#
+# What it needs that is not in the repository:
+#
+#   The stock HiBy images the packer starts from, as assets of a release tagged
+#   "stock-firmware" in this repository (or in the one named by the repository
+#   variable STOCK_REPO, read with the secret STOCK_TOKEN):
+#       r1_original.upt        r3proii_original.upt
+#   An image is built for each one that is there; with neither, the run fails.
+#   Publish that release as a pre-release (not a draft: a draft has no tag to
+#   fetch it by). Its tag is not a version number, so the player never takes it
+#   for an update.
+#
+#   Optionally, the streaming services' application keys, as two secrets:
+#       STREAMING_KEYS_INI     the whole of streaming-keys.ini
+#       STREAMING_KEYS_KEY     the 64 hex digits of streaming-keys.key
+#   Without them Tidal, Qobuz, the podcast catalogue and Last.fm are off in the
+#   images, and a user can still bring keys of their own on the card.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    # A change to the documents alone is not a new firmware. (Tags are not
+    # filtered by path.)
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
+  workflow_dispatch:
+
+# One build at a time for a branch or a tag; a newer push replaces the one
+# still running.
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  GH_REPO: ${{ github.repository }}
+  STOCK_TAG: stock-firmware
+  STOCK_REPO: ${{ vars.STOCK_REPO || github.repository }}
+  # How many build-* pre-releases are kept.
+  KEEP_BUILDS: 5
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # The first run builds the cross toolchain (GCC, glibc), which takes most
+    # of an hour; with the caches warm a run is a few minutes.
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide the tag and the version
+        id: ver
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+            version="${tag#v}"
+            # What the player can compare: up to four numbers with dots.
+            if ! printf '%s' "$version" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}$'; then
+              echo "::error::tag '$tag' is not a version like v1.4.0"
+              exit 1
+            fi
+            prerelease=false
+          else
+            tag="build-$(date -u +%Y%m%d)-$GITHUB_RUN_NUMBER"
+            version=""
+            prerelease=true
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag $tag, version '${version:-unchanged}', pre-release $prerelease"
+
+      - name: Install what the build needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex texinfo gawk patch m4 \
+            autoconf automake libtool libtool-bin pkg-config \
+            gettext gtk-doc-tools libglib2.0-dev-bin \
+            libgmp-dev libmpfr-dev libmpc-dev \
+            wget curl ca-certificates git python3 xz-utils bzip2 unzip rsync \
+            p7zip-full squashfs-tools genisoimage perl
+
+      # The cross toolchain changes only with the script that builds it.
+      - name: Cache the cross toolchain
+        uses: actions/cache@v4
+        with:
+          path: sonix-player/rockbox-toolchain
+          key: toolchain-${{ runner.os }}-${{ hashFiles('sonix-player/rockboxdev/**') }}
+
+      # FreeType, the audio libraries and FFmpeg, built by the Makefile with
+      # that toolchain: they change with either.
+      - name: Cache the static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            sonix-player/freetype-target
+            sonix-player/audio-target
+            sonix-player/video-target
+          key: libs-${{ runner.os }}-${{ hashFiles('sonix-player/rockboxdev/**', 'sonix-player/Makefile') }}
+
+      - name: Fetch the stock firmware
+        env:
+          GH_TOKEN: ${{ secrets.STOCK_TOKEN || github.token }}
+        run: |
+          gh release download "$STOCK_TAG" --repo "$STOCK_REPO" \
+            --pattern 'r1_original.upt' --pattern 'r3proii_original.upt' \
+            --dir sonix-packer || true
+          found=0
+          for f in r1_original.upt r3proii_original.upt; do
+            if [ -s "sonix-packer/$f" ]; then
+              echo "found $f ($(stat -c %s "sonix-packer/$f") bytes)"
+              found=$((found + 1))
+            else
+              echo "::warning::$f is not in the '$STOCK_TAG' release of $STOCK_REPO: no image for that player"
+            fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no stock firmware to start from. Create a release tagged '$STOCK_TAG' in $STOCK_REPO holding r1_original.upt and/or r3proii_original.upt."
+            exit 1
+          fi
+
+      - name: Write the version into the images
+        if: steps.ver.outputs.version != ''
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          for model in R1 R3PII; do
+            f="sonix-packer/assets/$model/usr/resource/sonix/components/system-info.json"
+            sed -i -E "s/(\"OS_version\"[[:space:]]*:[[:space:]]*\")[^\"]*(\")/\1$VERSION\2/" "$f"
+            grep -q "\"OS_version\": \"$VERSION\"" "$f" || { echo "::error::could not set OS_version in $f"; exit 1; }
+          done
+
+      - name: Seal the streaming keys, when there are any
+        env:
+          KEYS_INI: ${{ secrets.STREAMING_KEYS_INI }}
+          KEYS_KEY: ${{ secrets.STREAMING_KEYS_KEY }}
+        run: |
+          if [ -n "$KEYS_INI" ] && [ -n "$KEYS_KEY" ]; then
+            ( umask 077
+              printf '%s\n' "$KEYS_INI" > sonix-player/streaming-keys.ini
+              printf '%s\n' "$KEYS_KEY" > sonix-player/streaming-keys.key )
+            ( cd sonix-player && python3 tools/seal_streamkeys.py seal )
+            echo "streaming keys sealed into both images"
+          else
+            echo "no streaming keys in the secrets: Tidal, Qobuz, podcasts and Last.fm will be off"
+          fi
+
+      - name: Build the player
+        working-directory: sonix-player
+        run: |
+          make target -j"$(nproc)" 2>&1 | tee ../build.log
+          # The build itself fails on a symbol newer than the device's glibc;
+          # this only makes sure the check ran and says so in the log.
+          grep -q 'check-abi: no symbol beyond glibc 2.22' ../build.log
+          ls -l sonix_player sonix_launch
+
+      - name: Pack the firmware images
+        run: |
+          cp sonix-player/sonix_player sonix-player/sonix_launch sonix-packer/
+          # As root, as it is run by hand: the stock filesystem is unpacked and
+          # packed again with the owners and modes it came with.
+          sudo bash sonix-packer/sonix_firmware_packer.sh
+          sudo chown "$(id -u):$(id -g)" sonix-packer/*.upt
+          : > assets.txt
+          [ ! -s sonix-packer/r1_original.upt ] || { test -s sonix-packer/r1.upt && echo sonix-packer/r1.upt >> assets.txt; }
+          [ ! -s sonix-packer/r3proii_original.upt ] || { test -s sonix-packer/r3proii.upt && echo sonix-packer/r3proii.upt >> assets.txt; }
+          test -s assets.txt
+          sha256sum $(cat assets.txt) | sed 's|sonix-packer/||' | tee SHA256SUMS.txt
+
+      - name: Write the release notes
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          {
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "Automatic build of \`${GITHUB_SHA:0:7}\` on \`$GITHUB_REF_NAME\`. **Not a tested release**: it is built from the latest source and has not been run on a device."
+            else
+              echo "Release $TAG."
+            fi
+            echo
+            echo "> [!CAUTION]"
+            echo "> Flash only the file for your player: \`r1.upt\` for the HiBy R1, \`r3proii.upt\` for the HiBy R3 Pro II. The update system does not check, and the wrong one will not boot."
+            echo
+            echo "This fork's builds have been run on a HiBy R1. The R3 Pro II image is built from the same source and has not been run on a device by this fork: keep the stock firmware on a card before trying it."
+            echo
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+          } > notes.md
+          cat notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          flags=""
+          [ "$PRERELEASE" != "true" ] || flags="--prerelease"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # A run started again for the same tag: the files are replaced.
+            gh release upload "$TAG" $(cat assets.txt) SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" $(cat assets.txt) SHA256SUMS.txt \
+              --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md --generate-notes $flags
+          fi
+
+      - name: Keep the debug binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonix_player_debug-${{ steps.ver.outputs.tag }}
+          path: sonix-player/sonix_player_debug
+          retention-days: 30
+
+      - name: Drop the oldest automatic builds
+        if: steps.ver.outputs.prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("build-")))] | sort_by(.createdAt) | reverse | .['"$KEEP_BUILDS"':] | .[].tagName' |
+            while read -r old; do
+              echo "removing $old"
+              gh release delete "$old" --yes --cleanup-tag || true
+            done
