@@ -2,7 +2,7 @@
 
 <img src="sonix-packer/assets/R1/etc/boot-logo/dark-theme-blue.jpeg" width="240" alt="Bidhata's Modded SonixOS boot screen">
 
-# Bidhata's Modded SonixOS
+# SonixOS - Bidhata's Mod
 
 **For your HiBy R1 and R3 Pro II, rebuilt ~~from the ground up~~ with a few mods and tweaks I liked for my own device.**
 
