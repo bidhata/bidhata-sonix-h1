@@ -5,7 +5,8 @@
 #include "src/gui/audio/dacpage.h"
 #include "src/gui/audio/metronomepage.h"
 #include "src/gui/ebook/ebookpage.h"
-#include "src/gui/flappybird/flappybird.h"
+#include "src/gui/hopper/hopper.h"
+#include "src/gui/tower/tower.h"
 #include "src/gui/library/filespage.h"
 #include "src/gui/gearboy/gearboypage.h"
 #include "src/gui/shell/gridpage.h"
@@ -31,8 +32,8 @@ void morepage_init(gui_config_t *cfg) {
 		// when the page is entered, so a card that changed under the player
 		// shows what is on it now.
 		{"file_explorer", &icon_menu_file_explorer, NULL, filespage_open},
-		// An action: the artwork is read from the resource tree on the way in.
-		{"flappy_bird", &icon_menu_flappy_bird, NULL, flappybird_open},
+		{"tower", &icon_menu_tower, &tower_screen, NULL},
+		{"hopper", &icon_menu_hopper, &hopper_screen, NULL},
 		{"metronome", &icon_menu_metronome, &metronomepage_screen, NULL},
 #if VIDEO_CORE
 		// The video player. Present only when the binary carries FFmpeg (see
@@ -47,8 +48,8 @@ void morepage_init(gui_config_t *cfg) {
 	// even with fewer entries, so the only tile sits where it would with six --
 	// top left -- instead of floating in the middle of a page of its own.
 	//
-	// With video there are seven, one more than the grid holds: the tiles keep
-	// their size and the page scrolls to the last one, as the Music page does.
+	// With the games and video there are more than the grid holds: the tiles
+	// keep their size and the page scrolls to the last, as the Music page does.
 	int count = (int)(sizeof(entries) / sizeof(entries[0]));
 	lv_obj_t *grid = gridpage_build(morepage_screen, cfg, entries, count, 2, 3, true);
 	if (count > 2 * 3) {

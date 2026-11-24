@@ -42,7 +42,8 @@
 #include "src/gui/wireless/sonixlink.h"
 #include "src/gui/gearboy/gearboypage.h"
 #include "src/gui/gearboy/gearboysettings.h"
-#include "src/gui/flappybird/flappybird.h"
+#include "src/gui/hopper/hopper.h"
+#include "src/gui/tower/tower.h"
 #include "src/gui/gearboy/gearboyplay.h"
 #include "src/gui/video/videopage.h"
 #include "src/gui/video/videoplay.h"
@@ -678,7 +679,8 @@ void gui_init(gui_config_t *cfg) {
 	gearboyplay_screen = lv_obj_create(NULL);
 	videopage_screen = lv_obj_create(NULL);
 	videoplay_screen = lv_obj_create(NULL);
-	flappybird_screen = lv_obj_create(NULL);
+	tower_screen = lv_obj_create(NULL);
+	hopper_screen = lv_obj_create(NULL);
 	metronomepage_screen = lv_obj_create(NULL);
 
 	// Persistent topbar that stays above every screen.
@@ -727,7 +729,8 @@ void gui_init(gui_config_t *cfg) {
 	gearboypage_init(cfg);
 	videoplay_init(cfg); // before the list: its rows lead here
 	videopage_init(cfg);
-	flappybird_init(cfg);
+	tower_init(cfg);
+	hopper_init(cfg);
 	metronomepage_init(cfg);
 	// before morepage: the books tile opens the shelf, and the shelf opens the
 	// reader.

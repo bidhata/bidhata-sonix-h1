@@ -51,6 +51,16 @@ every format, real streaming, video, a VU meter that moves with the music, and n
 <b>SD card.</b> File system, a warning when the card was pulled out unsafely, a check for errors, a speed test with its result, and Format.
 </td>
 </tr>
+<tr>
+<td width="50%" align="center" valign="top">
+<img src="docs/screenshots/tower.png" width="62%" alt="Tower: floors with lit windows stacked on a hill under a blue sky, one hanging from a cable, and the score above"><br>
+<b>Tower.</b> Tap to drop the floor; what hangs over the edge is cut off. The sky turns from day to dusk, night and dawn as the tower grows.
+</td>
+<td width="50%" align="center" valign="top">
+<img src="docs/screenshots/hopper.png" width="62%" alt="Hopper: a round orange creature in the air between green ledges, with clouds behind"><br>
+<b>Hopper.</b> It bounces by itself; hold a side of the screen to steer it up the ledges. Some slide, some break, some are springs.
+</td>
+</tr>
 </table>
 
 ## WHY
@@ -72,7 +82,7 @@ All of this is Sonix Player's own work and came with it. The fork's part in it i
 | 📡 **Streaming** | Tidal, Qobuz, internet radio, Last.fm scrobbling, podcasts with downloads and OPML. |
 | 📖 **Books** | Audiobooks with chapters, speed and bookmarks, and the e-book reader. |
 | 📶 **Wireless** | Wi-Fi, Bluetooth out and in, AirPods battery and noise control, AirPlay, DLNA, Wi-Fi transfer, SonixLink, USB storage. |
-| 🎮 **Extras** | File manager, metronome, Game Boy emulator, Flappy Bird. |
+| 🎮 **Extras** | File manager, metronome, Game Boy emulator. |
 | 🎨 **The interface** | Themes, accent colours, dynamic tint, the control centre, button remapping, keyboards in eleven layouts, twelve languages, the screensaver and boot logos. |
 | 🔋 **The system** | Standby, charge limit, the battery screen, updates over the internet or from the card, the firmware packer, and the open drivers and kernel. |
 
@@ -92,6 +102,8 @@ All of this is Sonix Player's own work and came with it. The fork's part in it i
 | 🇮🇳 **Hindi text** | Titles and subtitles in Devanagari, drawn letter by letter. |
 | 🔒 **SonixLink off at start** | It has no password, so it no longer stays on by itself. |
 | ⏲️ **Longer auto power-off** | From 15 minutes up to 48 hours. |
+| 🧱 **Tower** | A one-tap stacking game drawn by the player itself, with no borrowed artwork: floors with lit windows, hills, clouds, and a sky that turns from day to night as you build. It takes the place of upstream's Flappy Bird, whose name, pictures and sounds were the original game's. |
+| 🐣 **Hopper** | A second game: a creature that bounces up an endless run of ledges while you steer, under a sky that darkens to night the higher you get. Also drawn by the player itself. |
 | 🧪 **Tests and builds** | Every audio format is decoded and checked before a release, and both images are built on GitHub from the source you see here. The kernel build kit lives in this repository. |
 
 Three more features come from pull requests that other people opened on Sonix Player and that are merged here: SACD ISO playback and the custom accent colour picker by CookieCaptainD, and Hebrew text by Dazrok.
@@ -173,7 +185,7 @@ The short version: it plays every format worth owning, streams, reads you books,
 - **Video player**: MPEG-4 and H.264 films from the card's `Video` folder, full screen and turned sideways, with pause, 10-second skips, a seek bar you can drag, elapsed and total time, subtitles from a `.srt` file beside the film, and resume where you left off. Sound on the socket or over Bluetooth. Films are [converted on a computer first](#converting-a-video).
 - **Game Boy**: Game Boy and Game Boy Color games through Gearboy, with save states, five palettes, shaders and colour correction.
 - **File manager**: browse, create, rename, move, copy and delete. Pictures, text files and videos open right there.
-- **Metronome** with tap tempo, and **Flappy Bird**, because why not.
+- **Metronome** with tap tempo, and two games you can play while the music runs: **Tower**, a one-tap stacking game, and **Hopper**, a climb up an endless run of ledges.
 
 ### 📶 Wireless
 
@@ -276,6 +288,8 @@ Pull requests are welcome: one thing per request, tested on a real player where 
 - **[Tartarus6](https://github.com/Tartarus6)** for Sonix Player and the [custom kernel](https://github.com/Tartarus6/hiby-custom-kernel) this runs on. A copy of the kernel build kit is in [`hiby-custom-kernel/`](hiby-custom-kernel).
 - **Jepl4r / M4ttia**, who started Sonix.
 - [@noisetta](https://github.com/noisetta), [@endgame47](https://github.com/endgame47), [@hkhrithik007](https://github.com/hkhrithik007) and everyone who has sent a fix upstream.
+- [@endgame47](https://github.com/endgame47) again, for suggesting this fork's name and the way this page keeps upstream's work and the fork's apart.
+- **Tavisco**, on Discord, for pointing out that Flappy Bird is somebody else's game to ship.
 - [LVGL](https://lvgl.io), [FFmpeg](https://ffmpeg.org), [Gearboy](https://github.com/drhelius/Gearboy), [BlueALSA](https://github.com/arkq/bluez-alsa), and the authors of the decoders in `src/system/decode`.
 
 Not affiliated with HiBy. HiBy is a trademark of its owner.

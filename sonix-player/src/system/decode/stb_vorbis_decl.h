@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 // Hand-written declarations for the subset of stb_vorbis.c's public API used by
-// decode.c and flappysound.c. stb_vorbis.c is compiled as its own translation
+// decode.c. stb_vorbis.c is compiled as its own translation
 // unit (picked up by the project Makefile's `find src -name '*.c'`), so it
 // cannot also be #included here as text without causing duplicate symbols.
 // These declarations must stay binary-compatible with the real ones near the

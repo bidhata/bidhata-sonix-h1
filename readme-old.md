@@ -284,7 +284,7 @@ assets/R3PII/                           (and assets/R1/, the same shape)
 │           │   └── GB*-Database.dat     the Game Boy ROM databases
 │           ├── fonts/               default.otf, bold.otf, then japanese, korean, thai, arabic and hebrew .otf and devanagari .ttf (Noto Sans Devanagari, OFL, licence beside it), each with a -bold;
 │           │                        ebook/ holds Bookerly for the EPUB reader
-│           └── gui/                 some of the .png assets the UI loads at runtime (Flappy Bird, the remap pictures,
+│           └── gui/                 some of the .png assets the UI loads at runtime (the remap pictures,
 │                                    the donation QR codes) - the rest are inside the binary.
 └── module_driver/                   the open-source modules and the changed load scripts
 ```
@@ -568,9 +568,9 @@ sonix-player/
 │   │   │   ├── audio/               EQ, PEQ, AutoEq, MSEB, the DAC page and the metronome
 │   │   │   ├── bluetooth/           pairing, codec, AirPods, receiver mode
 │   │   │   ├── ebook/               EPUB reader: pages, shelf, bar, bookmarks, themes
-│   │   │   ├── flappybird/          the game and its sounds
 │   │   │   ├── fonts/               the lv_font_t objects FreeType fills in at startup
 │   │   │   ├── gearboy/             game list, screen and button pad
+│   │   │   ├── hopper/              the climbing game
 │   │   │   ├── library/             browser, media lists, playlists, search, audiobooks, library scan,
 │   │   │   │                        file manager, picture and text viewer
 │   │   │   ├── nowplaying/          player screen, cover art, cover flow, waveform, queue, chapters,
@@ -579,6 +579,7 @@ sonix-player/
 │   │   │   ├── shell/               28 files: theme, screen switcher, status bar, control centre,
 │   │   │   │                        keyboard, popups, toasts, settings rows, first start, icons.c
 │   │   │   ├── streaming/           Tidal, Qobuz, podcast and radio pages, OPML import
+│   │   │   ├── tower/               the stacking game
 │   │   │   ├── video/               the Video list and the playback screen
 │   │   │   └── wireless/            Wi-Fi, file transfer, AirPlay, DLNA, SonixLink
 │   │   │

@@ -170,7 +170,8 @@ This is everything Bidhata's Modded SonixOS can do today, on both the **R1** and
   > Videos have to be converted first: the player has no hardware decoder and does not scale. `tools/video-convert.sh` (on a computer, needs ffmpeg) makes an MPEG-4 `.mp4` no larger than the screen from anything ffmpeg reads. [VIDEO.md](VIDEO.md) has the details.
 - **Resume** - a film opens where it was left, a few seconds earlier. One left in its first half minute or in its credits starts from the beginning.
 - **Subtitles** - a film shows the lines of a `.srt` file with its name lying beside it: `Film.mp4` and `Film.srt`, or `Film.en.srt`. UTF-8 and Windows-1252 files are read. Subtitles stored inside the film are not shown; [VIDEO.md](VIDEO.md) says how to take them out into a file.
-- **Flappy Bird**, with sounds.
+- **Hopper** - a round creature bounces by itself up an endless run of ledges; hold the left or the right side of the screen to steer it, and going off one side brings it back on the other. Some ledges slide, some break after one bounce and some are springs. The sky goes from day through evening to a starry night with the height. A fall off the bottom ends the game. No sound, and the best score is kept.
+- **Tower** - a block crosses the screen above a tower; tap to drop it. What lands on the tower stays and what hangs over the edge is cut off, so the blocks get narrower until one misses. A drop squarely on the block below counts double. The sky turns from day to dusk, night and dawn as the tower grows. It makes no sound, so the music plays on, and the best score is kept.
 
 ## Wireless
 

@@ -9,8 +9,9 @@
 // drops it. What lands on the tower stays, what hangs over the edge is cut off
 // and falls, so the blocks get narrower until one misses altogether.
 //
-// It is drawn with plain LVGL rectangles and labels: there is no artwork to
-// load and nothing to free. It makes no sound and leaves the music alone. The
+// The picture is made by the game itself -- a sky that turns from day to night
+// as the tower grows, hills, clouds, floors with lit windows -- so there is no
+// artwork to load. It makes no sound and leaves the music alone. The
 // best score is kept in the config, [tower] best.
 
 extern lv_obj_t *tower_screen;
