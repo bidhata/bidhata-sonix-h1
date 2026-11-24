@@ -61,6 +61,15 @@ cc -fsyntax-only -I. -D_FILE_OFFSET_BITS=64 -DHOST_BUILD=1 \
 # dosfstools and mtools, so it is skipped where they are not installed.
 if command -v mkfs.fat > /dev/null && command -v mcopy > /dev/null; then
 	sh tests/fatcheck_test.sh
+	sh tests/exfatcheck_test.sh # skips by itself where it cannot mount exFAT
 else
 	echo "fatcheck: skipped (mkfs.fat or mtools not installed)"
+fi
+
+# Task 6: every other format the decoder layer plays, a tone in and the same
+# tone out. Needs ffmpeg and the simulator's audio libraries.
+if command -v ffmpeg > /dev/null && pkg-config --exists opusfile wavpack; then
+	sh tests/decode_formats_test.sh
+else
+	echo "decode formats: skipped (ffmpeg, or the opusfile and wavpack development files, not installed)"
 fi

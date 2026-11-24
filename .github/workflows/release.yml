@@ -105,7 +105,9 @@ jobs:
             gettext gtk-doc-tools libglib2.0-dev-bin \
             libgmp-dev libmpfr-dev libmpc-dev \
             wget curl ca-certificates git python3 xz-utils bzip2 unzip rsync \
-            p7zip-full squashfs-tools genisoimage perl
+            p7zip-full squashfs-tools genisoimage perl \
+            ffmpeg libopusfile-dev libwavpack-dev libfdk-aac2 libsndfile1 \
+            dosfstools mtools exfatprogs
 
       # The cross toolchain changes only with the script that builds it.
       - name: Cache the cross toolchain
@@ -171,6 +173,14 @@ jobs:
           else
             echo "no streaming keys in the secrets: Tidal, Qobuz, podcasts and Last.fm will be off"
           fi
+
+      # Before anything is built for the device: the decoders against a tone
+      # in every format, and the card checker against images it has to repair
+      # or refuse. A failure here stops the release. The exFAT half needs to
+      # mount an image, hence root; it skips by itself where it cannot.
+      - name: Run the tests
+        working-directory: sonix-player
+        run: sudo bash tests/run.sh
 
       - name: Build the player
         working-directory: sonix-player
