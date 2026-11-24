@@ -40,6 +40,10 @@ on:
       - 'docs/**'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/pull_request_template.md'
+      # The kernel kit is built by hand, with Ingenic's SDK: the images carry
+      # the kernel already in sonix-packer/kernel, so a change there alone
+      # builds nothing new.
+      - 'hiby-custom-kernel/**'
   workflow_dispatch:
 
 # One build at a time for a branch or a tag; a newer push replaces the one

@@ -5,7 +5,7 @@ Work done on 2026-11-24 sits on the local branch `merge-upstream-prs`: upstream 
 ## Before the first flash
 
 - [x] `make target -j$(nproc)` in `sonix-player/`: passed `check-abi: no symbol beyond glibc 2.22`. The toolchain script also needs `gtk-doc-tools`, `gettext`, `pkg-config` and `libglib2.0-dev-bin` on the host; resume a failed run with `RBDEV_RESTART=<step> make target`.
-- [ ] Build `hiby-custom-kernel` with the SDK: nine module sources were changed and have never been compiled (`mp2731`, `soc_pwm`, `sa_hgl_dma`, `gt9xx_touch`, `cw2015`, `soc_aic`, `codec_cs43198_dual`, both sound cards).
+- [ ] Build `hiby-custom-kernel/` (now a folder of this repository) with the SDK: nine module sources were changed and have never been compiled (`mp2731`, `soc_pwm`, `sa_hgl_dma`, `gt9xx_touch`, `cw2015`, `soc_aic`, `codec_cs43198_dual`, both sound cards).
 - [x] Run `sonix-packer/sonix_firmware_packer.sh` (R1 only so far; rootfs is 47063040 of 47185920 bytes, so about 120 KB is left). It now stops if the overlay's modules do not match the kernel going into the image, and if the stock `.upt` is the other model's.
 - [x] Flash ONE device you can recover (stock firmware `.upt` ready on a card), charged above 30%: the R1, over ADB (`bootmode.sh Recovery`, then `reboot`).
 - [ ] Turn on Settings > Developer options > Log to microSD before testing, and keep the log.

@@ -242,7 +242,7 @@ make target -j$(nproc)    # the player, for the device
 
 The first `make target` builds its own cross toolchain, so it takes a while. To turn the result into a flashable image, put HiBy's stock firmware next to `sonix-packer/sonix_firmware_packer.sh` and run it.
 
-The full guide, with what to install, the simulator's options, the packer, the kernel and the source tree, is in **[readme-old.md](readme-old.md)**.
+The full guide, with what to install, the simulator's options, the packer and the source tree, is in **[readme-old.md](readme-old.md)**. The kernel has a kit of its own in **[hiby-custom-kernel/](hiby-custom-kernel)**: it needs Docker and Ingenic's SDK, and the images here are built with the kernel already in `sonix-packer/kernel`.
 
 ## Contributing
 
@@ -252,7 +252,7 @@ Pull requests are welcome: one thing per request, tested on a real player where 
 
 ## Credits
 
-- **[Tartarus6](https://github.com/Tartarus6)** for Sonix Player and the [custom kernel](https://github.com/Tartarus6/hiby-custom-kernel) this runs on.
+- **[Tartarus6](https://github.com/Tartarus6)** for Sonix Player and the [custom kernel](https://github.com/Tartarus6/hiby-custom-kernel) this runs on. A copy of the kernel build kit is in [`hiby-custom-kernel/`](hiby-custom-kernel).
 - **Jepl4r / M4ttia**, who started Sonix.
 - [@noisetta](https://github.com/noisetta), [@endgame47](https://github.com/endgame47), [@hkhrithik007](https://github.com/hkhrithik007) and everyone who has sent a fix upstream.
 - [LVGL](https://lvgl.io), [FFmpeg](https://ffmpeg.org), [Gearboy](https://github.com/drhelius/Gearboy), [BlueALSA](https://github.com/arkq/bluez-alsa), and the authors of the decoders in `src/system/decode`.
