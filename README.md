@@ -25,8 +25,29 @@ every format, real streaming, video, a VU meter that moves with the music, and n
 <img src="docs/screenshots/music.png" width="19%" alt="Music library">
 <img src="docs/screenshots/meter-dials.png" width="19%" alt="Now Playing with VU dials">
 <img src="docs/screenshots/meter-spectrum.png" width="19%" alt="Now Playing with the spectrum">
-<img src="docs/screenshots/accent-picker.png" width="19%" alt="Accent colour picker">
+<img src="docs/screenshots/more.png" width="19%" alt="More: games, books, files and video">
 </div>
+
+## A closer look
+
+<table>
+<tr>
+<td colspan="2" align="center">
+<img src="docs/screenshots/video-player.png" width="72%" alt="The video player on a HiBy R1, with its controls up"><br>
+<b>Video player.</b> A film playing on a HiBy R1, held sideways: pause, 10-second skips, a seek bar to drag, elapsed and total time.
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" valign="top">
+<img src="docs/screenshots/meter-dials.png" width="62%" alt="Now Playing with two VU dials"><br>
+<b>VU dials.</b> Two needles and a held peak mark over the cover. Tap for bars or a ten-band spectrum.
+</td>
+<td width="50%" align="center" valign="top">
+<img src="docs/screenshots/sd-card.png" width="62%" alt="The SD card page: file system, state, speed test and format"><br>
+<b>SD card.</b> File system, a warning when the card was pulled out unsafely, a speed test with its result, and Format.
+</td>
+</tr>
+</table>
 
 ## Why
 
