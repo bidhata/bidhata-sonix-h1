@@ -4,7 +4,7 @@
 
 # Bidhata's Modded SonixOS
 
-**For your HiBy R1 and R3 Pro II, rebuilt ~~from the ground up~~ with a few mods I liked for my own device.**
+**For your HiBy R1 and R3 Pro II, rebuilt ~~from the ground up~~ with a few mods and tweaks I liked for my own device.**
 
 Open-source firmware that turns a pocket music player into the one you wished it shipped as:<br>
 every format, real streaming, video, a VU meter that moves with the music, and nothing you cannot change.
