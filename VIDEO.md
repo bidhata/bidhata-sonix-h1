@@ -18,6 +18,8 @@ This page is how.
 3. Copy the `.mp4` into a folder called `Video` in the root of the card.
 4. On the player: More > Video, and tap the film.
 
+For subtitles, put a SubRip file with the same name next to the film: `My Film.mp4` and `My Film.srt` (or `My Film.en.srt`). UTF-8 and Windows-1252 files are read. Subtitles stored inside the film itself are not shown; `ffmpeg -i "My Film.mkv" "My Film.srt"` takes them out into a file.
+
 ## What the player can play
 
 | | |

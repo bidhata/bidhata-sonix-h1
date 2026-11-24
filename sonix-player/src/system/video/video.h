@@ -89,6 +89,11 @@ bool video_repaint(uint16_t *into);
 // along the panel's right edge. Known from the first frame on.
 bool video_turned(void);
 
+// Where on the panel the picture is: the part of the image a frame is written
+// into, as it is shown, turned or not. For anything drawn over or beside the
+// film. False, and nothing filled in, before the first frame.
+bool video_picture_area(int *x, int *y, int *w, int *h);
+
 // True when `name` ends in an extension this player opens as video.
 bool video_is_video_file(const char *name);
 

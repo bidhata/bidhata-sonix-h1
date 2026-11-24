@@ -1,6 +1,7 @@
 #include "videoplay.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lvgl/lvgl.h"
@@ -13,6 +14,7 @@
 #include "src/gui/shell/volume_overlay.h"
 #include "src/system/core/lang.h"
 #include "src/system/device/power.h"
+#include "src/system/video/subtitles.h"
 #include "src/system/video/video.h"
 #include "src/system/video/videoresume.h"
 
@@ -117,6 +119,46 @@ static int direct_to_clear;	  // pages not yet cleared to black around the pictu
 static uint32_t disturbed_ms; // when something other than the film last drew
 static bool own_drawing;	  // the area being invalidated is the picture's
 
+// ---------------------------------------------------------------------------
+// subtitles
+// ---------------------------------------------------------------------------
+//
+// A line of text over the film has to be there in both ways of drawing, and
+// the direct one has no LVGL in it to draw a label. So a line is made into a
+// small picture once, when it comes up: an ordinary label, kept off the panel
+// where nothing draws it, is drawn into a buffer of its own
+// (lv_snapshot_take) and copied from there into `subs_pixels`, already turned
+// when the film is. From then on the direct path mixes that picture into each
+// frame after the film's own pixels, and the LVGL path shows the same buffer
+// in an image. Neither draws text again until the line changes.
+//
+// The buffer is the largest a line can need and is kept for the whole film:
+// the image points into it, and LVGL must never be left holding a pointer to
+// memory that has been freed and handed out again.
+
+#define SUBS_SIDE 32	  // kept clear at either end of a line, as the viewer sees it
+#define SUBS_BOTTOM 84	  // from the viewer's bottom edge: above the bar and its times
+#define SUBS_GAP 10		  // under a picture with a wide black band below it
+#define SUBS_MAX_H 150	  // four lines; what a longer text is cut to
+
+static bool subs_have;	   // this film has subtitles
+static lv_obj_t *subs_label; // the label the picture is taken of; never on the panel
+static lv_obj_t *subs_image; // the picture, for when LVGL draws
+static lv_image_dsc_t subs_dsc;
+static uint8_t *subs_pixels; // RGB565A8: the colours, then one byte of cover per pixel
+static size_t subs_room;	 // how many pixels it holds
+static int subs_cue = -1;	 // the line the picture is of; -1 for none
+static int subs_x, subs_y, subs_w, subs_h; // where it goes on the panel
+static unsigned subs_layout;			   // what it was laid out for: see subs_layout_now()
+static int subs_image_cue = -2;			   // the line the image was last given
+static unsigned subs_image_layout;
+
+// A line that has gone leaves its text on whatever lies outside the picture,
+// which no frame draws over. The place is blacked out on each of the two
+// framebuffer pages before the next frame goes into it.
+static int subs_wipe;
+static int wipe_x, wipe_y, wipe_w, wipe_h;
+
 static void invalidated_cb(lv_event_t *e) {
 	(void)e;
 	if (!own_drawing) {
@@ -124,12 +166,15 @@ static void invalidated_cb(lv_event_t *e) {
 	}
 }
 
+static void subs_sync_image(void);
+
 static void direct_enter(void) {
 	if (direct || !display_direct_page()) {
 		return;
 	}
 	direct = true;
 	direct_to_clear = 2;
+	subs_wipe = 0; // both pages are about to be cleared whole
 	printf("videoplay: drawing straight into the framebuffer (%dx%d)\n", panel_w, panel_h);
 }
 
@@ -142,9 +187,239 @@ static void direct_leave(void) {
 	direct = false;
 	printf("videoplay: drawing through LVGL (%dx%d)\n", panel_w, panel_h);
 	video_repaint(NULL);
+	subs_sync_image(); // the line that was being drawn by hand is LVGL's again
 	lv_obj_invalidate(lv_screen_active());
 	lv_obj_invalidate(lv_layer_top());
 	lv_obj_invalidate(lv_layer_sys());
+}
+
+// Everything a line's picture depends on besides its text: which way up the
+// film is and where on the panel it lies. Known from the first frame on, so a
+// line that was made before it is made again.
+static unsigned subs_layout_now(void) {
+	int x = 0, y = 0, w = 0, h = 0;
+	video_picture_area(&x, &y, &w, &h);
+	return (unsigned)video_turned() | (unsigned)x << 1 | (unsigned)y << 11 | (unsigned)w << 21;
+}
+
+// The black band under the picture, as the viewer sees it: nothing when the
+// picture reaches the edge or has not been seen yet.
+static int band_below_picture(bool turned) {
+	int x, y, w, h;
+	if (!video_picture_area(&x, &y, &w, &h)) {
+		return 0;
+	}
+	// A turned picture has its bottom along the panel's left edge.
+	return turned ? x : panel_h - (y + h);
+}
+
+// Remembers that the place the picture is in now has to be blacked out, on
+// top of whatever was still waiting to be.
+static void subs_wipe_current(void) {
+	if (subs_cue < 0 || subs_w <= 0) {
+		return;
+	}
+	if (subs_wipe > 0) {
+		int x2 = wipe_x + wipe_w, y2 = wipe_y + wipe_h;
+		int nx2 = subs_x + subs_w, ny2 = subs_y + subs_h;
+		wipe_x = subs_x < wipe_x ? subs_x : wipe_x;
+		wipe_y = subs_y < wipe_y ? subs_y : wipe_y;
+		wipe_w = (nx2 > x2 ? nx2 : x2) - wipe_x;
+		wipe_h = (ny2 > y2 ? ny2 : y2) - wipe_y;
+	} else {
+		wipe_x = subs_x, wipe_y = subs_y, wipe_w = subs_w, wipe_h = subs_h;
+	}
+	subs_wipe = 2;
+}
+
+// Makes the picture of line `cue`, or of nothing.
+static void subs_make(int cue) {
+	subs_wipe_current();
+	subs_cue = -1;
+	subs_layout = subs_layout_now();
+	if (cue < 0 || !subs_pixels) {
+		return;
+	}
+
+	bool turned = video_turned();
+	int across = turned ? panel_h : panel_w; // the viewer's width
+	lv_obj_set_style_max_width(subs_label, across - 2 * SUBS_SIDE, 0);
+	lv_label_set_text(subs_label, subtitles_text(cue));
+	lv_draw_buf_t *shot = lv_snapshot_take(subs_label, LV_COLOR_FORMAT_ARGB8888);
+	if (!shot) {
+		return; // out of memory for a moment: the film goes on without this line
+	}
+
+	// As the viewer sees it, cut to what the buffer holds.
+	int w = (int)shot->header.w, h = (int)shot->header.h;
+	if (w > across - 2 * SUBS_SIDE) {
+		w = across - 2 * SUBS_SIDE;
+	}
+	if (h > SUBS_MAX_H) {
+		h = SUBS_MAX_H;
+	}
+	if (w <= 0 || h <= 0 || (size_t)w * (size_t)h > subs_room) {
+		lv_draw_buf_destroy(shot);
+		return;
+	}
+
+	// On the panel a turned line stands on its end: as wide as it was tall.
+	int out_w = turned ? h : w, out_h = turned ? w : h;
+	uint16_t *colour = (uint16_t *)subs_pixels;
+	uint8_t *cover = subs_pixels + (size_t)out_w * out_h * 2;
+	for (int y = 0; y < h; y++) {
+		const uint8_t *in = shot->data + (size_t)y * shot->header.stride; // blue, green, red, cover
+		for (int x = 0; x < w; x++, in += 4) {
+			// A quarter turn clockwise, as the film itself is turned: the
+			// line's left end at the top of the panel, its foot to the left.
+			size_t at = turned ? (size_t)x * out_w + (size_t)(h - 1 - y) : (size_t)y * out_w + (size_t)x;
+			colour[at] = (uint16_t)((in[2] >> 3) << 11 | (in[1] >> 2) << 5 | in[0] >> 3);
+			cover[at] = in[3];
+		}
+	}
+	lv_draw_buf_destroy(shot);
+
+	// Above the controls' bar; or, when the picture leaves a wide black band
+	// below it, straight under the picture rather than far away at the edge.
+	int band = band_below_picture(turned);
+	int from_edge = band - h - SUBS_GAP > SUBS_BOTTOM ? band - h - SUBS_GAP : SUBS_BOTTOM;
+	if (turned) {
+		subs_x = from_edge;
+		subs_y = (panel_h - out_h) / 2;
+	} else {
+		subs_x = (panel_w - out_w) / 2;
+		subs_y = panel_h - from_edge - out_h;
+	}
+	if (subs_x < 0 || subs_y < 0 || subs_x + out_w > panel_w || subs_y + out_h > panel_h) {
+		return; // a panel too small for it; nothing is drawn outside the page
+	}
+	subs_w = out_w;
+	subs_h = out_h;
+	subs_cue = cue;
+}
+
+// Brings the picture up to date with where the film is. Every tick.
+static void subs_update(void) {
+	if (!subs_have) {
+		return;
+	}
+	int cue = subtitles_cue_at(video_position_ms());
+	if (cue != subs_cue || (cue >= 0 && subs_layout != subs_layout_now())) {
+		subs_make(cue);
+	}
+}
+
+// Gives LVGL's image the picture as it is now. Only while LVGL is the one
+// drawing: anything invalidated during direct drawing would have it paint
+// into a framebuffer page behind the film's back.
+static void subs_sync_image(void) {
+	if (!subs_image || (subs_image_cue == subs_cue && subs_image_layout == subs_layout)) {
+		return;
+	}
+	subs_image_cue = subs_cue;
+	subs_image_layout = subs_layout;
+
+	// The film's own drawing, as far as "who else wants the screen" goes: a
+	// line changing must not be what keeps direct drawing from starting.
+	own_drawing = true;
+	if (subs_cue < 0) {
+		lv_obj_set_hidden(subs_image, true);
+	} else {
+		subs_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+		subs_dsc.header.cf = LV_COLOR_FORMAT_RGB565A8;
+		subs_dsc.header.w = (uint32_t)subs_w;
+		subs_dsc.header.h = (uint32_t)subs_h;
+		subs_dsc.header.stride = (uint32_t)subs_w * 2;
+		subs_dsc.data_size = (uint32_t)subs_w * (uint32_t)subs_h * 3;
+		subs_dsc.data = subs_pixels;
+		lv_image_set_src(subs_image, &subs_dsc);
+		lv_obj_set_pos(subs_image, subs_x, subs_y);
+		lv_obj_set_size(subs_image, subs_w, subs_h);
+		lv_obj_set_hidden(subs_image, false);
+		lv_obj_invalidate(subs_image); // the same buffer with other pixels in it
+	}
+	own_drawing = false;
+}
+
+// Blacks out where a line that has gone was, in a framebuffer page about to
+// take a frame. The frame then draws its part of that again.
+static void subs_wipe_page(uint16_t *page) {
+	for (int y = 0; y < wipe_h; y++) {
+		memset(page + (size_t)(wipe_y + y) * panel_w + wipe_x, 0, (size_t)wipe_w * 2);
+	}
+}
+
+// Mixes the line into a framebuffer page that has just taken a frame. Over
+// the picture it is mixed with the film. Beside the picture it is mixed with
+// black instead of with what is there, which is this same line from two
+// frames ago: mixing with that over and over would fatten the letters' soft
+// edges a little more with every frame.
+static void subs_blend_page(uint16_t *page) {
+	if (subs_cue < 0) {
+		return;
+	}
+	int px = 0, py = 0, pw = 0, ph = 0;
+	video_picture_area(&px, &py, &pw, &ph);
+	const uint16_t *colour = (const uint16_t *)subs_pixels;
+	const uint8_t *cover = subs_pixels + (size_t)subs_w * subs_h * 2;
+
+	for (int y = 0; y < subs_h; y++) {
+		int panel_y = subs_y + y;
+		bool row_in_picture = panel_y >= py && panel_y < py + ph;
+		uint16_t *out = page + (size_t)panel_y * panel_w + subs_x;
+		for (int x = 0; x < subs_w; x++, colour++, cover++, out++) {
+			unsigned a = *cover;
+			if (a == 0) {
+				continue;
+			}
+			if (a >= 250) {
+				*out = *colour;
+				continue;
+			}
+			int panel_x = subs_x + x;
+			unsigned under = row_in_picture && panel_x >= px && panel_x < px + pw ? *out : 0;
+			unsigned c = *colour;
+			// The three colours each on their own, 5, 6 and 5 bits wide.
+			unsigned r = ((c >> 11) * a + (under >> 11) * (255 - a)) / 255;
+			unsigned g = (((c >> 5) & 63) * a + ((under >> 5) & 63) * (255 - a)) / 255;
+			unsigned b = ((c & 31) * a + (under & 31) * (255 - a)) / 255;
+			*out = (uint16_t)(r << 11 | g << 5 | b);
+		}
+	}
+}
+
+// A film is opening: its subtitles, if it has any, and the buffer for them.
+static void subs_open(const char *path) {
+	subs_cue = -1;
+	subs_wipe = 0;
+	subs_image_cue = -2;
+	subs_have = subtitles_load(path);
+	if (!subs_have) {
+		return;
+	}
+	// The longest side less the margins, by the tallest a line may be: enough
+	// for the film either way up.
+	int longest = panel_w > panel_h ? panel_w : panel_h;
+	subs_room = (size_t)(longest - 2 * SUBS_SIDE) * SUBS_MAX_H;
+	subs_pixels = malloc(subs_room * 3);
+	if (!subs_pixels) {
+		subs_have = false;
+		subtitles_unload();
+	}
+}
+
+// The film is over. The image lets go of the buffer before it is freed.
+static void subs_close(void) {
+	lv_image_set_src(subs_image, NULL);
+	lv_obj_set_hidden(subs_image, true);
+	subs_image_cue = -2;
+	subs_cue = -1;
+	subs_wipe = 0;
+	subs_have = false;
+	free(subs_pixels);
+	subs_pixels = NULL;
+	subs_room = 0;
+	subtitles_unload();
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +699,8 @@ static void poll_cb(lv_timer_t *timer) {
 		lv_obj_set_hidden(picture, false);
 	}
 
+	subs_update();
+
 	// Who draws this tick (see "drawing direct").
 	bool film_only = video_running() && !video_paused() && !controls_visible() && lv_obj_is_hidden(veil_label) && picture_dsc.data != NULL && lv_tick_get() - disturbed_ms > DIRECT_QUIET_MS;
 	if (direct && !film_only) {
@@ -443,18 +720,32 @@ static void poll_cb(lv_timer_t *timer) {
 			memset(page, 0, (size_t)panel_w * (size_t)panel_h * 2);
 			direct_to_clear = 1;
 		}
+		// Before the frame, so that the frame puts back what part of the
+		// picture this takes out. A tick with no frame due leaves the page
+		// wiped and unseen, and the next one does it again: it only counts
+		// once a frame has gone in and the page has been shown.
+		if (subs_wipe > 0) {
+			subs_wipe_page(page);
+		}
 		if (video_present(page)) {
+			subs_blend_page(page);
 			display_direct_flip();
+			if (subs_wipe > 0) {
+				subs_wipe--;
+			}
 			if (direct_to_clear == 1) {
 				memset(display_direct_page(), 0, (size_t)panel_w * (size_t)panel_h * 2);
 				direct_to_clear = 0;
 			}
 		}
-	} else if (video_present(NULL)) {
-		lv_obj_set_hidden(veil_label, true);
-		own_drawing = true;
-		lv_obj_invalidate(picture);
-		own_drawing = false;
+	} else {
+		subs_sync_image();
+		if (video_present(NULL)) {
+			lv_obj_set_hidden(veil_label, true);
+			own_drawing = true;
+			lv_obj_invalidate(picture);
+			own_drawing = false;
+		}
 	}
 
 	if (video_ended()) {
@@ -497,6 +788,7 @@ static void screen_loaded_cb(lv_event_t *e) {
 	if (pending_path[0]) {
 		int64_t at = videoresume_get(pending_path);
 		snprintf(playing_path, sizeof(playing_path), "%s", pending_path);
+		subs_open(pending_path);
 		video_start(pending_path, at > RESUME_BACK_MS ? at - RESUME_BACK_MS : 0);
 		pending_path[0] = '\0';
 	}
@@ -520,6 +812,7 @@ static void screen_unloaded_cb(lv_event_t *e) {
 	lv_image_set_src(picture, NULL);
 	picture_dsc.data = NULL;
 	lv_obj_set_hidden(picture, true);
+	subs_close();
 
 	// Where it was left, read before the thread goes. A film that ran to its
 	// end, or was left close to either end, is forgotten instead.
@@ -591,6 +884,28 @@ void videoplay_init(gui_config_t *cfg) {
 	lv_obj_set_pos(picture, 0, 0);
 	lv_obj_set_size(picture, panel_w, panel_h);
 	lv_obj_set_hidden(picture, true);
+
+	// The subtitle line, over the picture and under everything else. And the
+	// label its picture is taken of (see "subtitles"), parked far off the
+	// panel: it is laid out like any other, and never drawn there.
+	subs_image = lv_image_create(videoplay_screen);
+	lv_obj_set_hidden(subs_image, true);
+	subs_label = lv_label_create(videoplay_screen);
+	lv_obj_set_pos(subs_label, 0, -4 * panel_h);
+	lv_obj_set_size(subs_label, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+	lv_obj_set_style_max_height(subs_label, SUBS_MAX_H, 0);
+	lv_label_set_long_mode(subs_label, LV_LABEL_LONG_WRAP);
+	lv_label_set_text(subs_label, "");
+	lv_obj_set_style_text_align(subs_label, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_set_style_text_font(subs_label, &font_ui_24, 0);
+	lv_obj_set_style_text_color(subs_label, lv_color_white(), 0);
+	// A dark plate behind the words: white letters on a white shirt are not
+	// read otherwise.
+	lv_obj_set_style_bg_color(subs_label, lv_color_black(), 0);
+	lv_obj_set_style_bg_opa(subs_label, LV_OPA_60, 0);
+	lv_obj_set_style_radius(subs_label, 8, 0);
+	lv_obj_set_style_pad_hor(subs_label, 12, 0);
+	lv_obj_set_style_pad_ver(subs_label, 6, 0);
 
 	// What is said while the file opens, and when it does not.
 	veil_label = lv_label_create(videoplay_screen);

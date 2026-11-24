@@ -60,6 +60,13 @@ bool video_repaint(uint16_t *into) {
 	return false;
 }
 bool video_turned(void) { return false; }
+bool video_picture_area(int *x, int *y, int *w, int *h) {
+	(void)x;
+	(void)y;
+	(void)w;
+	(void)h;
+	return false;
+}
 
 #else
 
@@ -321,10 +328,15 @@ static bool shown_turned(int w, int h) {
 }
 
 // Upright: row to row, centred.
+// Where the last frame converted was put (video_picture_area). Written and
+// read on the interface thread, like the image itself.
+static int pic_x, pic_y, pic_w, pic_h;
+
 static void convert_upright(const AVFrame *f, uint16_t *dst) {
 	int w = f->width & ~1, h = f->height & ~1;
 	int off_x = ((out_w - w) / 2) & ~1;
 	int off_y = ((out_h - h) / 2) & ~1;
+	pic_x = off_x, pic_y = off_y, pic_w = w, pic_h = h;
 
 	for (int y = 0; y < h; y += 2) {
 		const uint8_t *y0 = f->data[0] + (ptrdiff_t)y * f->linesize[0];
@@ -358,6 +370,7 @@ static void convert_turned(const AVFrame *f, uint16_t *dst) {
 	int w = f->width & ~1, h = f->height & ~1;
 	int off_x = ((out_w - h) / 2) & ~1;
 	int off_y = ((out_h - w) / 2) & ~1;
+	pic_x = off_x, pic_y = off_y, pic_w = h, pic_h = w; // as it lies on the panel
 	ptrdiff_t ls = f->linesize[0], lsu = f->linesize[1], lsv = f->linesize[2];
 
 	enum { BAND = 32 };
@@ -992,6 +1005,14 @@ const char *video_error(void) { return error_key; }
 bool video_ended(void) { return ended_flag; }
 bool video_paused(void) { return paused_flag; }
 bool video_turned(void) { return turned_flag; }
+
+bool video_picture_area(int *x, int *y, int *w, int *h) {
+	if (pic_w <= 0 || pic_h <= 0) {
+		return false;
+	}
+	*x = pic_x, *y = pic_y, *w = pic_w, *h = pic_h;
+	return true;
+}
 void video_set_paused(bool paused) { paused_flag = paused; }
 int64_t video_duration_ms(void) { return duration_ms; }
 
@@ -1063,6 +1084,7 @@ bool video_start(const char *path, int64_t start_ms) {
 
 	tables_ready = false;
 	turned_flag = false;
+	pic_w = pic_h = 0;
 	duration_ms = 0;
 	paused_flag = false;
 	ended_flag = false;
