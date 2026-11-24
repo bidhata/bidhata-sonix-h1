@@ -103,7 +103,7 @@ All of this is Sonix Player's own work and came with it. The fork's part in it i
 | 🔒 **SonixLink off at start** | It has no password, so it no longer stays on by itself. |
 | ⏲️ **Longer auto power-off** | From 15 minutes up to 48 hours. |
 | 🧱 **Tower** | A one-tap stacking game drawn by the player itself, with no borrowed artwork: floors with lit windows, hills, clouds, and a sky that turns from day to night as you build. It takes the place of upstream's Flappy Bird, whose name, pictures and sounds were the original game's. |
-| 🐣 **Hopper** | A second game: a creature that bounces up an endless run of ledges while you steer, under a sky that darkens to night the higher you get. Also drawn by the player itself. |
+| 🐣 **Hopper** | A second game: a creature that bounces up an endless run of ledges while you steer, under a sky that darkens to night the higher you get. Also drawn by the player itself. Both games have sound effects when no music is playing, and stay silent when it is. |
 | 🧪 **Tests and builds** | Every audio format is decoded and checked before a release, and both images are built on GitHub from the source you see here. The kernel build kit lives in this repository. |
 
 Three more features come from pull requests that other people opened on Sonix Player and that are merged here: SACD ISO playback and the custom accent colour picker by CookieCaptainD, and Hebrew text by Dazrok.
@@ -185,7 +185,7 @@ The short version: it plays every format worth owning, streams, reads you books,
 - **Video player**: MPEG-4 and H.264 films from the card's `Video` folder, full screen and turned sideways, with pause, 10-second skips, a seek bar you can drag, elapsed and total time, subtitles from a `.srt` file beside the film, and resume where you left off. Sound on the socket or over Bluetooth. Films are [converted on a computer first](#converting-a-video).
 - **Game Boy**: Game Boy and Game Boy Color games through Gearboy, with save states, five palettes, shaders and colour correction.
 - **File manager**: browse, create, rename, move, copy and delete. Pictures, text files and videos open right there.
-- **Metronome** with tap tempo, and two games you can play while the music runs: **Tower**, a one-tap stacking game, and **Hopper**, a climb up an endless run of ledges.
+- **Metronome** with tap tempo, and two games, with their own sounds or silent under your music: **Tower**, a one-tap stacking game, and **Hopper**, a climb up an endless run of ledges.
 
 ### 📶 Wireless
 

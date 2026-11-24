@@ -12,6 +12,7 @@
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/topbar.h"
 #include "src/gui/shell/volume_overlay.h"
+#include "src/system/audio/gamesound.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 #include "src/system/device/power.h"
@@ -400,6 +401,7 @@ static void drop(void) {
 		// Beside the tower, or on it by a sliver: the whole block goes.
 		falling_add((float)x, mover_w, level);
 		lv_obj_set_hidden(mover_obj, true);
+		gamesound_play(GAMESOUND_OVER);
 		game_over();
 		return;
 	} else if (x < top.x) {
@@ -427,6 +429,7 @@ static void drop(void) {
 	if (exact) {
 		sparks_throw(left, right - left);
 	}
+	gamesound_play(exact ? GAMESOUND_EXACT : GAMESOUND_DROP);
 	sky_set((placed / BLOCKS_PER_SKY) % SKIES);
 }
 
@@ -615,6 +618,7 @@ static void screen_loaded_cb(lv_event_t *e) {
 	new_game();
 	render();
 
+	gamesound_start();
 	active = true;
 	last_us = now_us();
 	lv_timer_resume(tick_timer);
@@ -624,6 +628,7 @@ static void screen_unloaded_cb(lv_event_t *e) {
 	(void)e;
 	active = false;
 	lv_timer_pause(tick_timer);
+	gamesound_stop();
 	if (best_unsaved) {
 		best_unsaved = false;
 		config_save();

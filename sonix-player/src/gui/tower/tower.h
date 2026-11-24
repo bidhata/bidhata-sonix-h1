@@ -11,8 +11,9 @@
 //
 // The picture is made by the game itself -- a sky that turns from day to night
 // as the tower grows, hills, clouds, floors with lit windows -- so there is no
-// artwork to load. It makes no sound and leaves the music alone. The
-// best score is kept in the config, [tower] best.
+// artwork to load. Its sounds (gamesound.h) are heard when no music is playing;
+// with music on it is silent and leaves the music alone. The best score is
+// kept in the config, [tower] best.
 
 extern lv_obj_t *tower_screen;
 

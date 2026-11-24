@@ -12,8 +12,9 @@
 //
 // The picture is made by the game itself -- the creature, the ledges, clouds
 // low down and stars high up over a sky that darkens with the height -- so
-// there is no artwork to load. It makes no sound and leaves the music alone.
-// The best score is kept in the config, [hopper] best.
+// there is no artwork to load. Its sounds (gamesound.h) are heard when no music
+// is playing; with music on it is silent and leaves the music alone. The best
+// score is kept in the config, [hopper] best.
 
 extern lv_obj_t *hopper_screen;
 

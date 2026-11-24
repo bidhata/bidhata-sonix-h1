@@ -11,6 +11,7 @@
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/topbar.h"
 #include "src/gui/shell/volume_overlay.h"
+#include "src/system/audio/gamesound.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
 #include "src/system/device/power.h"
@@ -285,6 +286,7 @@ static void game_over(void) {
 		best_unsaved = true; // written out when the game is left
 	}
 	show_score();
+	gamesound_play(GAMESOUND_OVER);
 	lv_obj_set_hidden(hint_label, true);
 	lv_obj_set_hidden(over_box, false);
 }
@@ -347,6 +349,7 @@ static void step(int64_t us) {
 				p->broken = true;
 				p->vy = 0;
 			}
+			gamesound_play(p->kind == LEDGE_SPRING ? GAMESOUND_SPRING : p->kind == LEDGE_BRITTLE ? GAMESOUND_BREAK : GAMESOUND_BOUNCE);
 			break;
 		}
 	}
@@ -508,6 +511,7 @@ static void screen_loaded_cb(lv_event_t *e) {
 	new_game();
 	render();
 
+	gamesound_start();
 	active = true;
 	last_us = now_us();
 	lv_timer_resume(tick_timer);
@@ -517,6 +521,7 @@ static void screen_unloaded_cb(lv_event_t *e) {
 	(void)e;
 	active = false;
 	lv_timer_pause(tick_timer);
+	gamesound_stop();
 	if (best_unsaved) {
 		best_unsaved = false;
 		config_save();
