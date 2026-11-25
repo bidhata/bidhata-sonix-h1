@@ -307,7 +307,9 @@ static void open_playlist(const char *name) {
 	medialist_open(name, LIBRARY_LIST_PLAYLIST, LIBRARY_FILTER_NONE, name);
 }
 
-
+// The playlist a duplicate question is waiting on: confirm_show() runs its
+// action after the card has closed, so the name cannot be read off the row
+// that was tapped by then.
 static char confirm_playlist[PLAYLIST_NAME_MAX + 1];
 
 static void add_pending_track_confirmed(void *user) {
@@ -361,9 +363,7 @@ static void row_clicked_cb(lv_event_t *e) {
 		}
 		if (duplicate) {
 			snprintf(confirm_playlist, sizeof(confirm_playlist), "%s", name);
-			confirm_show("Song already in playlist",
-						 "One or more of these songs are already in this playlist. Add them anyway?",
-						 "Add anyway", add_pending_batch_confirmed, NULL);
+			confirm_show("playlist_duplicate_title", "playlist_duplicate_many", "playlist_add_anyway", add_pending_batch_confirmed, NULL);
 			return;
 		}
 		batch_start(name);
@@ -373,9 +373,7 @@ static void row_clicked_cb(lv_event_t *e) {
 
 	if (pending_track[0] && playlists_has_track(name, pending_track)) {
 		snprintf(confirm_playlist, sizeof(confirm_playlist), "%s", name);
-		confirm_show("Song already in playlist",
-					 "This song is already in this playlist. Add it anyway?",
-					 "Add anyway", add_pending_track_confirmed, NULL);
+		confirm_show("playlist_duplicate_title", "playlist_duplicate_one", "playlist_add_anyway", add_pending_track_confirmed, NULL);
 		return;
 	}
 
