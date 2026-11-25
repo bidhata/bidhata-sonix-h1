@@ -163,17 +163,30 @@ static bool record_name_is(const unsigned char *rec, const char *want) {
 	return len == strlen(want) && strncasecmp(name, want, len) == 0;
 }
 
+// Seeks to a sector, having first checked that the sector is inside the file.
+// Both the extent and the length come out of the image, and on the target a
+// long is 32 bits: multiplying a 32-bit sector number by 2048 before checking
+// it would overflow, which is undefined rather than merely wrong. off_t is 64
+// bits here (-D_FILE_OFFSET_BITS=64), so the arithmetic is done in that.
+static bool seek_sector(FILE *f, uint32_t sector, uint32_t extra, off_t size) {
+	off_t at = (off_t)sector * ISO_SECTOR + (off_t)extra;
+	if (at < 0 || size <= 0 || at >= size) {
+		return false;
+	}
+	return fseeko(f, at, SEEK_SET) == 0;
+}
+
 // Walks one directory's extent looking for `want`. Fills the extent and length
 // of what it finds. Records never straddle a sector: a zero length byte means
 // the rest of the sector is padding.
-static bool dir_find(FILE *f, uint32_t extent, uint32_t bytes, const char *want, bool want_dir, uint32_t *out_extent,
-					 uint32_t *out_len) {
+static bool dir_find(FILE *f, off_t size, uint32_t extent, uint32_t bytes, const char *want, bool want_dir,
+					 uint32_t *out_extent, uint32_t *out_len) {
 	if (bytes > ISO_MAX_DIR_BYTES) {
 		bytes = ISO_MAX_DIR_BYTES;
 	}
 	unsigned char sector[ISO_SECTOR];
 	for (uint32_t off = 0; off < bytes; off += ISO_SECTOR) {
-		if (fseek(f, (long)extent * ISO_SECTOR + (long)off, SEEK_SET) != 0) {
+		if (!seek_sector(f, extent, off, size)) {
 			return false;
 		}
 		if (fread(sector, 1, sizeof(sector), f) != sizeof(sector)) {
@@ -212,21 +225,27 @@ static image_id_t image_declared_id(const char *path, char *out, size_t out_size
 	}
 
 	image_id_t result = IMAGE_ID_UNREADABLE;
+	// The length, so every extent the image declares can be checked against it.
+	off_t size = 0;
+	if (fseeko(f, 0, SEEK_END) == 0) {
+		size = ftello(f);
+	}
+
 	unsigned char pvd[ISO_SECTOR];
-	if (fseek(f, ISO_PVD_SECTOR * ISO_SECTOR, SEEK_SET) == 0 && fread(pvd, 1, sizeof(pvd), f) == sizeof(pvd) &&
+	if (seek_sector(f, ISO_PVD_SECTOR, 0, size) && fread(pvd, 1, sizeof(pvd), f) == sizeof(pvd) &&
 		pvd[0] == 1 && memcmp(pvd + 1, "CD001", 5) == 0 && le16(pvd + 128) == ISO_SECTOR) {
 		// The root's own record sits inside the volume descriptor.
 		uint32_t root_extent = le32(pvd + 156 + 2);
 		uint32_t root_len = le32(pvd + 156 + 10);
 		uint32_t dir_extent = 0, dir_len = 0;
-		if (!dir_find(f, root_extent, root_len, "OTA_V0", true, &dir_extent, &dir_len)) {
+		if (!dir_find(f, size, root_extent, root_len, "OTA_V0", true, &dir_extent, &dir_len)) {
 			// No OTA_V0 at all: not one of these images.
 			fclose(f);
 			return IMAGE_ID_UNREADABLE;
 		}
 
 		uint32_t file_extent = 0, file_len = 0;
-		if (!dir_find(f, dir_extent, dir_len, "OTA_COMP.IN", false, &file_extent, &file_len)) {
+		if (!dir_find(f, size, dir_extent, dir_len, "OTA_COMP.IN", false, &file_extent, &file_len)) {
 			fclose(f);
 			return IMAGE_ID_READ; // a sound image that names no hardware
 		}
@@ -235,7 +254,7 @@ static image_id_t image_declared_id(const char *path, char *out, size_t out_size
 			file_len = ISO_COMPAT_MAX;
 		}
 		char buf[ISO_COMPAT_MAX + 1];
-		if (fseek(f, (long)file_extent * ISO_SECTOR, SEEK_SET) == 0 && fread(buf, 1, file_len, f) == file_len) {
+		if (seek_sector(f, file_extent, 0, size) && fread(buf, 1, file_len, f) == file_len) {
 			buf[file_len] = '\0';
 			const char *key = strstr(buf, "compatibility=");
 			if (key) {
