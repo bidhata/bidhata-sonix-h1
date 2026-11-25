@@ -214,16 +214,20 @@ static void refresh_labels(void) {
 	}
 
 	// The cable check, like standby, keeps its interval on a slider that is
-	// only meaningful while the switch is on. A saved 0 is off.
-	int usb_wake_index = usb_wake_after_index();
-	bool usb_wake = USB_WAKE_AFTER[usb_wake_index].seconds > 0;
-	if (usb_wake) {
-		lv_obj_add_state(usb_wake_switch, LV_STATE_CHECKED);
-	} else {
-		lv_obj_remove_state(usb_wake_switch, LV_STATE_CHECKED);
+	// only meaningful while the switch is on. A saved 0 is off. The row only
+	// exists on the player the check applies to, so there may be nothing here
+	// to paint.
+	if (usb_wake_card) {
+		int usb_wake_index = usb_wake_after_index();
+		bool usb_wake = USB_WAKE_AFTER[usb_wake_index].seconds > 0;
+		if (usb_wake) {
+			lv_obj_add_state(usb_wake_switch, LV_STATE_CHECKED);
+		} else {
+			lv_obj_remove_state(usb_wake_switch, LV_STATE_CHECKED);
+		}
+		lv_label_set_text(usb_wake_value, tr(USB_WAKE_AFTER[usb_wake_index].label));
+		settingsrow_toggle_slider_expanded(usb_wake_card, usb_wake);
 	}
-	lv_label_set_text(usb_wake_value, tr(USB_WAKE_AFTER[usb_wake_index].label));
-	settingsrow_toggle_slider_expanded(usb_wake_card, usb_wake);
 
 	// One card: the slider is only on it while the toggle is on.
 	bool auto_off = config_get_bool("power", "auto_off", false);
@@ -371,16 +375,23 @@ void powersettings_init(gui_config_t *cfg) {
 	// While it sleeps, the R1 wakes briefly every so often to see whether a
 	// cable arrived, so storage can show up without pressing power. The shorter
 	// the wait the more often it wakes, and the more battery that costs.
-	usb_wake_card = settingsrow_toggle_slider(container, "power_usb_wake", USB_WAKE_AFTER_COUNT, &usb_wake_switch,
-											 &usb_wake_value, &usb_wake_slider, usb_wake_toggled_cb,
-											 usb_wake_changed_cb);
-	lv_slider_set_value(usb_wake_slider, usb_wake_after_index(), LV_ANIM_OFF);
-	lv_obj_t *usb_wake_note = lv_label_create(container);
-	lv_label_set_long_mode(usb_wake_note, LV_LABEL_LONG_WRAP);
-	lv_obj_set_width(usb_wake_note, lv_pct(100));
-	lv_obj_add_style(usb_wake_note, &theme_style_text_dim, 0);
-	lv_obj_set_style_text_font(usb_wake_note, &font_ui_22, 0);
-	lv_label_set_text(usb_wake_note, tr("power_usb_wake_note"));
+	//
+	// Only on the R1. The other player's MP2731 wakes the board on insert by
+	// itself (see rtc_alarm_arm() in power.c), so the check would cost battery
+	// and buy nothing -- and a setting that does nothing is worse than no
+	// setting. The same answer picks the interval's default in power_init().
+	if (axpcharge_applies()) {
+		usb_wake_card = settingsrow_toggle_slider(container, "power_usb_wake", USB_WAKE_AFTER_COUNT, &usb_wake_switch,
+												  &usb_wake_value, &usb_wake_slider, usb_wake_toggled_cb,
+												  usb_wake_changed_cb);
+		lv_slider_set_value(usb_wake_slider, usb_wake_after_index(), LV_ANIM_OFF);
+		lv_obj_t *usb_wake_note = lv_label_create(container);
+		lv_label_set_long_mode(usb_wake_note, LV_LABEL_LONG_WRAP);
+		lv_obj_set_width(usb_wake_note, lv_pct(100));
+		lv_obj_add_style(usb_wake_note, &theme_style_text_dim, 0);
+		lv_obj_set_style_text_font(usb_wake_note, &font_ui_22, 0);
+		lv_label_set_text(usb_wake_note, tr("power_usb_wake_note"));
+	}
 
 	// The R1 charges through its PMIC, which takes a lower target voltage and a
 	// lower current rather than a percentage: two switches there, the slider
