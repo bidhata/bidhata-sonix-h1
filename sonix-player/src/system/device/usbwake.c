@@ -5,7 +5,24 @@
 #include "usbwake.h"
 
 uint32_t usbwake_default_seconds(bool pmic_charger) {
-	return pmic_charger ? 30u : 0u;
+	// Off on both players, for now, whatever the charger is.
+	//
+	// The check needs the R1 to wake from "mem" and carry on running, and that
+	// resets the board: left to sleep unplugged with the check on, it comes
+	// back up about thirty seconds later, over and over. Turning the check off
+	// again leaves standby working, which is what pins it on this.
+	//
+	// It is not this feature's fault. The device log holds exactly one
+	// successful wake from "mem" in its whole history, and that one powered
+	// off immediately afterwards, as the automatic shutdown is meant to --
+	// nothing has ever woken this board and gone on using it. The cable check
+	// is simply the first thing to ask for it.
+	//
+	// The setting stays on the Power page so the resume can be worked on and
+	// measured. When a wake is shown to survive, this goes back to 30 for a
+	// PMIC-charged player.
+	(void)pmic_charger;
+	return 0u;
 }
 
 bool usbwake_interval_valid(uint32_t seconds) {

@@ -10,8 +10,12 @@
 #include <stdint.h>
 
 int main(void) {
-	assert(usbwake_default_seconds(true) == 30);
+	// Off on both, whatever the charger: waking the R1 from "mem" and carrying
+	// on resets the board, so the check starts off. See the note in usbwake.c.
+	assert(usbwake_default_seconds(true) == 0);
 	assert(usbwake_default_seconds(false) == 0);
+	// The arbitration below still has to work for the day it goes back on, so
+	// the interval is passed in rather than taken from the default.
 	assert(usbwake_interval_valid(0) && usbwake_interval_valid(15));
 	assert(usbwake_interval_valid(30) && usbwake_interval_valid(60));
 	assert(!usbwake_interval_valid(10));

@@ -20,8 +20,9 @@ typedef enum {
 // watcher can poll VBUS and the battery gauge can take a reading.
 #define USBWAKE_AWAKE_MS 6000u
 
-// The cable-check interval on a player whose PMIC is its charger (the R1).
-// Elsewhere the MP2731 already wakes on cable insert, so the answer is off.
+// The cable-check interval a player starts with. Zero on both at the moment:
+// waking the R1 from "mem" and carrying on resets the board, so the check is
+// off until that is fixed. See the note in usbwake.c.
 uint32_t usbwake_default_seconds(bool pmic_charger);
 
 // Only 0 (off), 15, 30 and 60 seconds are offered by the settings slider.
