@@ -217,7 +217,7 @@ jobs:
             fi
             echo
             echo "> [!CAUTION]"
-            echo "> Flash only the file for your player: \`r1.upt\` for the HiBy R1, \`r3proii.upt\` for the HiBy R3 Pro II. The update system does not check, and the wrong one will not boot."
+            echo "> Flash only the file for your player: \`r1.upt\` for the HiBy R1, \`r3proii.upt\` for the HiBy R3 Pro II. Updating from SonixOS this is checked and an image meant for the other player is refused; updating from the stock firmware, or through recovery, nothing checks, and the wrong one will not boot."
             echo
             echo "This fork's builds have been run on a HiBy R1. The R3 Pro II image is built from the same source and has not been run on a device by this fork: keep the stock firmware on a card before trying it."
             echo
