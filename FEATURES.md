@@ -65,6 +65,7 @@ This is everything Bidhata's Modded SonixOS can do today, on both the **R1** and
 - **Fade** - the end of a track fades into the next one, from 1 to 12 seconds.
 - **ReplayGain** - off, by track or by album, read from the tags.
 - **Remember track** - the queue and the position are still there after a restart. You can also open Now Playing straight away at startup.
+- **Play once** - the repeat button has a setting that stops playback at the end of the current track, whatever is queued behind it. It does not apply to a podcast queue, which plays on.
 - **Sleep timer** - set a time and the playback pauses by itself when it runs out. There is one for music, one for audiobooks and one for podcasts.
 - **Auto sleep timer** - an optional nightly window (22:00 to 06:00 unless changed) in which music, audiobooks and podcasts pause after their sleep timer's length without the timer being switched on by hand. Pressing a button or a key on the headphone remote starts the countdown again. It stays off while the clock is not set.
 
