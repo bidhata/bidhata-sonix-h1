@@ -67,6 +67,11 @@ typedef struct {
 	int panel_width;		 // the panel, on the device and on the simulator alike
 	int panel_height;
 	const char *update_stem; // "<stem>.upt" is the update file this player accepts
+	// What this player's images write in ota_compatibility.in, the one plain
+	// member of the .upt that names the hardware. NULL for a player whose
+	// images carry no such file: the R3 Pro II's do not, stock or ours, and
+	// that absence is itself what tells the two apart (firmware.h).
+	const char *compat_id;
 	const char *serial_prefix; // what the number on the box starts with
 	bool pmic_charger;		   // charged by the AXP2101 alone, no MP2731 (axpcharge.h)
 	bool cs43131;			   // one CS43131, 3.5 mm only, no HBC3000 (alsa-controls.h)

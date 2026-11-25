@@ -77,9 +77,14 @@ ROOTFS_MAX=$((0x2d00000))
 # system-info.json. The last one is not decoration -- it is checked against the
 # file the overlay actually landed, which is what stops an R1 image being built
 # with the R3 Pro II's name in it and offering that model's updates.
+# folder|stock image|image to write|device-name|the compatibility id
+# ota_v0/ota_compatibility.in must declare. The R3 Pro II's images carry no
+# such member at all, stock or ours, and the player expects that absence --
+# it is how the two are told apart before recovery is armed
+# (compat_id in src/system/device/sysinfo.h). Keep the two in step.
 MODELS=(
-	"R3PII|r3proii_original.upt|r3proii.upt|HiBy R3 Pro II"
-	"R1|r1_original.upt|r1.upt|HiBy R1"
+	"R3PII|r3proii_original.upt|r3proii.upt|HiBy R3 Pro II|"
+	"R1|r1_original.upt|r1.upt|HiBy R1|hiby_r1_x1600_auto_rf_auto"
 )
 
 WORK_DIR="$SCRIPT_DIR/temp"
@@ -115,6 +120,39 @@ STOCK_UI_DIRS=(usr/resource/litegui usr/resource/layout usr/resource/str usr/res
 #
 # PATH is relative to the root of the image and may be the result of a glob
 # that matched nothing: what is not there is skipped.
+# The player refuses an image that does not declare its own hardware, so an
+# image that declares the wrong thing -- or nothing where something is wanted --
+# would be refused by the device it was built for. Checked here, where it is a
+# failed build rather than a player that will not take its next update.
+#
+# `ota_v0/ota_compatibility.in` is a member of the ISO, not a file in the
+# rootfs, so drop_if_unnamed() never sees it; it is carried over from the stock
+# image. 7z reads the listing, and the packer already needs 7z.
+verify_compat_member() {
+	local image="$1" want="$2"
+	local listing line found=0 value=""
+
+	listing="$(7z l "$image" 2>/dev/null || true)"
+	if printf '%s\n' "$listing" | grep -qi 'ota_v0/ota_compatibility\.in'; then
+		found=1
+		value="$(7z e -so "$image" 'ota_v0/ota_compatibility.in' 2>/dev/null | tr -d '\r' \
+			| sed -n 's/^compatibility=//p' | head -1)"
+	fi
+
+	if [ -n "$want" ]; then
+		[ "$found" = 1 ] || die "the image declares no hardware, but this player's images must
+  declare \"$want\" in ota_v0/ota_compatibility.in. The player would refuse it."
+		[ "$value" = "$want" ] || die "the image declares \"$value\" where \"$want\" was wanted.
+  The player compares the two and would refuse it."
+		say "    compatibility = $value"
+	else
+		[ "$found" = 0 ] || die "the image declares \"$value\", but this player's images must
+  carry no ota_v0/ota_compatibility.in at all -- that absence is what tells it
+  from the other player. The player would refuse it."
+		say "    compatibility = none, as this player's images are"
+	fi
+}
+
 drop_if_unnamed() {
 	local name="$1"
 	shift
@@ -320,7 +358,7 @@ ASSETS_DIR="$SCRIPT_DIR/assets"
 # error -- it is a model this person does not own.
 BUILDABLE=""
 for entry in "${MODELS[@]}"; do
-	IFS='|' read -r m_dir m_src m_out m_name <<< "$entry"
+	IFS='|' read -r m_dir m_src m_out m_name m_compat <<< "$entry"
 	if [ ! -d "$ASSETS_DIR/$m_dir" ]; then
 		warn "assets/$m_dir is missing: $m_name will be skipped."
 		continue
@@ -367,6 +405,7 @@ say ""
 build_one() {
 	local MODEL_DIR="$1" MODEL_NAME="$2"
 	local SOURCE_UPT="$SCRIPT_DIR/$3" OUTPUT_UPT="$SCRIPT_DIR/$4"
+	local MODEL_COMPAT="$5"
 
 	say "${YELLOW}###############################################${NC}"
 	say "${YELLOW}###   $MODEL_NAME${NC}"
@@ -578,7 +617,7 @@ build_one() {
 	# size. It is listed because the other reason for the difference is having
 	# added a file to one tree and forgotten the other.
 	for other in "${MODELS[@]}"; do
-		IFS='|' read -r o_dir o_src o_out o_name <<< "$other"
+		IFS='|' read -r o_dir o_src o_out o_name o_compat <<< "$other"
 		[ "$o_dir" != "$MODEL_DIR" ] || continue
 		[ -d "$ASSETS_DIR/$o_dir" ] || continue
 		while IFS= read -r rel; do
@@ -903,6 +942,8 @@ $ISO_LOG"
 
 	[ -f "$OUTPUT_UPT" ] || die "the image was not written."
 
+	verify_compat_member "$OUTPUT_UPT" "$MODEL_COMPAT"
+
 	cleanup
 
 	say "  $OUTPUT_UPT"
@@ -913,9 +954,9 @@ $ISO_LOG"
 # ==========================================================================
 # Every model that can be built
 # ==========================================================================
-while IFS='|' read -r m_dir m_src m_out m_name; do
+while IFS='|' read -r m_dir m_src m_out m_name m_compat; do
 	[ -n "$m_dir" ] || continue
-	build_one "$m_dir" "$m_name" "$m_src" "$m_out"
+	build_one "$m_dir" "$m_name" "$m_src" "$m_out" "$m_compat"
 done <<< "$BUILDABLE"
 
 say "${GREEN}#############################${NC}"

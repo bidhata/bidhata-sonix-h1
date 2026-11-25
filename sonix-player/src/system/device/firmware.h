@@ -48,9 +48,15 @@ const char *firmware_update_stem(void);
 bool firmware_update_file_find(char *out, size_t out_size);
 
 // Checks an image before recovery is armed. The file name must be this
-// model's, and the image must declare this model: the recovery kernel flashes
-// whatever it is handed, so a wrong image renamed to the right file name would
-// otherwise brick the player.
+// model's, and the image must declare this model in ota_compatibility.in, the
+// one plain member of the .upt that names the hardware (compat_id in
+// sysinfo.h; the R3 Pro II's images carry no such member, and that absence is
+// what the check expects of them). The recovery kernel flashes whatever it is
+// handed, so a wrong image renamed to the right file name would otherwise
+// brick the player.
+//
+// An image whose directory cannot be read is refused rather than taken to
+// declare nothing.
 //
 // OTA_OK means the image passed. OTA_MODEL_MISMATCH names a file for another
 // player, OTA_NO_MODEL a build that cannot name its own image.

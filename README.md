@@ -220,7 +220,9 @@ The short version: it plays every format worth owning, streams, reads you books,
 ## Install
 
 > [!CAUTION]
-> **Flash only the file for your player.** `r1.upt` is for the R1, `r3proii.upt` for the R3 Pro II. The update system does not check, and the wrong one will not boot.
+> **Flash only the file for your player.** `r1.upt` is for the R1, `r3proii.upt` for the R3 Pro II. The wrong one will not boot.
+>
+> Updating **from SonixOS** this is checked: it reads the model out of the image and refuses one meant for the other player. Updating **from the stock firmware**, or through recovery, nothing checks — so that is the moment to read the file name twice.
 
 1. Get the image for your player from the **[releases page](https://github.com/bidhata/bidhata-sonix-h1/releases)**, or [build it yourself](#build-it-yourself).
 2. Charge the player **above 30%**.
@@ -230,7 +232,7 @@ The short version: it plays every format worth owning, streams, reads you books,
    - from SonixOS: Settings > System > Update firmware > From SD card.
 5. It says "Upgrading...", then "Succeeded", and restarts by itself.
 
-Going back is the same steps with HiBy's original firmware.
+Going back is the same steps with HiBy's original firmware. Keep the stock image for **your** model on a computer before you need it: it is what gets the player back if a build here ever leaves it unbootable.
 
 > [!WARNING]
 > **The R3 Pro II image is untested.** Every build here has been flashed and used on a **HiBy R1**. The `r3proii.upt` files are produced by the same build but nobody on this fork has started one on an R3 Pro II. Before you try it: charge the player, keep HiBy's stock firmware on a card, and expect that you may need it. If it works, or if it does not, please [open an issue](https://github.com/bidhata/bidhata-sonix-h1/issues/new/choose) and say so.

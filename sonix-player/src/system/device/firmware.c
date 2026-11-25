@@ -1,7 +1,7 @@
 #include "firmware.h"
 
-#include <ctype.h>
 #include <dirent.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,66 +110,149 @@ bool firmware_update_file_find(char *out, size_t out_size) {
 	return find_in_dir(root, name, out, out_size);
 }
 
-// The part of the model name that survives every image build: "HiBy R1" and
-// "HiBy R3", from system-info.json's "HiBy R1" and "HiBy R3 Pro II". The
-// stock R3 image spells it "HiBy R3PROII", so the full name would miss a
-// stock image and refuse a legitimate rollback.
-static void model_marker(const char *name, char *out, size_t size) {
-	const char *first = strchr(name, ' ');
-	if (!first) {
-		snprintf(out, size, "%s", name);
-		return;
-	}
-	const char *second = strchr(first + 1, ' ');
-	size_t len = second ? (size_t)(second - name) : strlen(name);
-	if (len >= size) {
-		len = size - 1;
-	}
-	memcpy(out, name, len);
-	out[len] = '\0';
+// ---------------------------------------------------------------------------
+// Which player an image is for
+// ---------------------------------------------------------------------------
+//
+// A .upt is an ISO9660 image, and the one member that names the hardware is
+// /OTA_V0/OTA_COMPATIBILITY.IN -- "OTA_COMP.IN;1" once the name is cut to 8.3,
+// which is how both the stock images and the packer's own write it. It holds
+// one line, "compatibility=hiby_r1_x1600_auto_rf_auto" on the R1.
+//
+// It is read by walking the directory rather than by searching the image for
+// the string. The payload is a squashfs compressed with LZO, which leaves
+// stretches of its input as literal bytes, so a string can appear anywhere in
+// it by accident -- and both players' rootfs hold the other one's name,
+// sonix_player's own model table among them. A search would be right or wrong
+// depending on how one build happened to compress, in both directions: letting
+// a renamed image through, or refusing a release the player should install.
+// The installed firmware judges the next one, so a wrong refusal would shut
+// the card and the network paths together.
+
+#define ISO_SECTOR 2048
+#define ISO_PVD_SECTOR 16
+#define ISO_DIR_RECORD_FLAG 0x02 // the record describes a directory
+#define ISO_MAX_DIR_BYTES (256 * 1024)
+#define ISO_COMPAT_MAX 512
+
+typedef enum {
+	IMAGE_ID_READ,	// the image was read and `out` holds what it declares ("" for none)
+	IMAGE_ID_UNREADABLE, // not an ISO9660 image, or damaged: never treated as "declares none"
+} image_id_t;
+
+static uint32_t le32(const unsigned char *p) {
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-// Case-insensitive search across chunk boundaries. An image is tens of
-// megabytes, so it is read a piece at a time; the last need-1 bytes stay in
-// the buffer to catch a name split between two reads.
-static bool file_contains(const char *path, const char *needle) {
-	size_t need = strlen(needle);
-	if (need == 0) {
+static uint16_t le16(const unsigned char *p) { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8)); }
+
+// One directory record's name, without the ";1" version ISO9660 appends to
+// files, compared without regard to case. The length byte comes out of the
+// image, so it is checked against the record it sits in: a damaged or hostile
+// image must not be able to read past the sector.
+static bool record_name_is(const unsigned char *rec, const char *want) {
+	size_t len = rec[32];
+	if (33 + len > rec[0]) {
 		return false;
 	}
+	const char *name = (const char *)rec + 33;
+	const char *semi = memchr(name, ';', len);
+	if (semi) {
+		len = (size_t)(semi - name);
+	}
+	return len == strlen(want) && strncasecmp(name, want, len) == 0;
+}
+
+// Walks one directory's extent looking for `want`. Fills the extent and length
+// of what it finds. Records never straddle a sector: a zero length byte means
+// the rest of the sector is padding.
+static bool dir_find(FILE *f, uint32_t extent, uint32_t bytes, const char *want, bool want_dir, uint32_t *out_extent,
+					 uint32_t *out_len) {
+	if (bytes > ISO_MAX_DIR_BYTES) {
+		bytes = ISO_MAX_DIR_BYTES;
+	}
+	unsigned char sector[ISO_SECTOR];
+	for (uint32_t off = 0; off < bytes; off += ISO_SECTOR) {
+		if (fseek(f, (long)extent * ISO_SECTOR + (long)off, SEEK_SET) != 0) {
+			return false;
+		}
+		if (fread(sector, 1, sizeof(sector), f) != sizeof(sector)) {
+			return false;
+		}
+		size_t i = 0;
+		while (i < sizeof(sector)) {
+			unsigned char len = sector[i];
+			if (len == 0) {
+				break; // padding to the end of the sector
+			}
+			if (len < 34 || i + len > sizeof(sector)) {
+				return false; // a record that does not fit is a damaged image
+			}
+			const unsigned char *rec = sector + i;
+			bool is_dir = (rec[25] & ISO_DIR_RECORD_FLAG) != 0;
+			if (is_dir == want_dir && rec[32] > 0 && record_name_is(rec, want)) {
+				*out_extent = le32(rec + 2);
+				*out_len = le32(rec + 10);
+				return true;
+			}
+			i += len;
+		}
+	}
+	return false;
+}
+
+// What the image says it is for: the value after "compatibility=" in that one
+// member, or "" when the member is not there, which is itself an answer.
+static image_id_t image_declared_id(const char *path, char *out, size_t out_size) {
+	out[0] = '\0';
 
 	FILE *f = fopen(path, "rb");
 	if (!f) {
-		return false;
+		return IMAGE_ID_UNREADABLE;
 	}
 
-	char buf[8192];
-	size_t have = 0;
-	bool found = false;
-	while (!found) {
-		size_t n = fread(buf + have, 1, sizeof(buf) - have, f);
-		if (n == 0) {
-			break;
+	image_id_t result = IMAGE_ID_UNREADABLE;
+	unsigned char pvd[ISO_SECTOR];
+	if (fseek(f, ISO_PVD_SECTOR * ISO_SECTOR, SEEK_SET) == 0 && fread(pvd, 1, sizeof(pvd), f) == sizeof(pvd) &&
+		pvd[0] == 1 && memcmp(pvd + 1, "CD001", 5) == 0 && le16(pvd + 128) == ISO_SECTOR) {
+		// The root's own record sits inside the volume descriptor.
+		uint32_t root_extent = le32(pvd + 156 + 2);
+		uint32_t root_len = le32(pvd + 156 + 10);
+		uint32_t dir_extent = 0, dir_len = 0;
+		if (!dir_find(f, root_extent, root_len, "OTA_V0", true, &dir_extent, &dir_len)) {
+			// No OTA_V0 at all: not one of these images.
+			fclose(f);
+			return IMAGE_ID_UNREADABLE;
 		}
-		have += n;
-		for (size_t i = 0; i + need <= have; i++) {
-			size_t j = 0;
-			while (j < need && tolower((unsigned char)buf[i + j]) == tolower((unsigned char)needle[j])) {
-				j++;
+
+		uint32_t file_extent = 0, file_len = 0;
+		if (!dir_find(f, dir_extent, dir_len, "OTA_COMP.IN", false, &file_extent, &file_len)) {
+			fclose(f);
+			return IMAGE_ID_READ; // a sound image that names no hardware
+		}
+
+		if (file_len > ISO_COMPAT_MAX) {
+			file_len = ISO_COMPAT_MAX;
+		}
+		char buf[ISO_COMPAT_MAX + 1];
+		if (fseek(f, (long)file_extent * ISO_SECTOR, SEEK_SET) == 0 && fread(buf, 1, file_len, f) == file_len) {
+			buf[file_len] = '\0';
+			const char *key = strstr(buf, "compatibility=");
+			if (key) {
+				key += strlen("compatibility=");
+				size_t n = 0;
+				while (key[n] && key[n] != '\n' && key[n] != '\r' && n + 1 < out_size) {
+					n++;
+				}
+				memcpy(out, key, n);
+				out[n] = '\0';
 			}
-			if (j == need) {
-				found = true;
-				break;
-			}
+			result = IMAGE_ID_READ; // the member was read, empty value included
 		}
-		if (found || have < need - 1) {
-			break;
-		}
-		memmove(buf, buf + have - (need - 1), need - 1);
-		have = need - 1;
 	}
+
 	fclose(f);
-	return found;
+	return result;
 }
 
 ota_result_t firmware_update_model_check(const char *path) {
@@ -182,6 +265,9 @@ ota_result_t firmware_update_model_check(const char *path) {
 		return OTA_NO_MODEL;
 	}
 
+	// The name first, which is free. Recovery flashes whatever it is handed,
+	// so the name alone settles nothing -- but a file named for the other
+	// player need not be opened.
 	const char *base = strrchr(path, '/');
 	base = base ? base + 1 : path;
 	char wanted[80];
@@ -191,12 +277,23 @@ ota_result_t firmware_update_model_check(const char *path) {
 	}
 
 	const sysinfo_model_t *model = sysinfo_model();
-	if (!model || !model->name[0]) {
+	if (!model) {
 		return OTA_NO_MODEL;
 	}
-	char marker[32];
-	model_marker(model->name, marker, sizeof(marker));
-	return file_contains(path, marker) ? OTA_OK : OTA_MODEL_MISMATCH;
+
+	char declared[64];
+	if (image_declared_id(path, declared, sizeof(declared)) != IMAGE_ID_READ) {
+		printf("firmware: %s is not an update image this player can read\n", base);
+		return OTA_MODEL_MISMATCH;
+	}
+
+	const char *expected = model->compat_id ? model->compat_id : "";
+	if (strcasecmp(declared, expected) != 0) {
+		printf("firmware: image declares '%s', this player wants '%s'\n", declared, expected);
+		return OTA_MODEL_MISMATCH;
+	}
+	printf("firmware: image is for this player ('%s')\n", declared[0] ? declared : "no compatibility id, as expected");
+	return OTA_OK;
 }
 
 bool firmware_file_sha256(const char *path, char out[SHA256_HEX_LEN]) {
