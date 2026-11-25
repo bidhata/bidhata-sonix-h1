@@ -231,16 +231,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
           PRERELEASE: ${{ steps.ver.outputs.prerelease }}
         run: |
           flags=""
           [ "$PRERELEASE" != "true" ] || flags="--prerelease"
+          # What the releases page shows, and what the player prints beside
+          # the tag when it finds an update. A tagged release is named by its
+          # version; an automatic build has no version of its own, so it is
+          # named by its tag instead of trailing an empty space.
+          title="SonixOS-Bidhata's Mod ${VERSION:-$TAG}"
           if gh release view "$TAG" > /dev/null 2>&1; then
-            # A run started again for the same tag: the files are replaced.
+            # A run started again for the same tag: the files are replaced,
+            # and the title is set again in case the release was made by hand
+            # or by an older run of this workflow.
             gh release upload "$TAG" $(cat assets.txt) SHA256SUMS.txt --clobber
+            gh release edit "$TAG" --title "$title"
           else
             gh release create "$TAG" $(cat assets.txt) SHA256SUMS.txt \
-              --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md $flags
+              --target "$GITHUB_SHA" --title "$title" --notes-file notes.md $flags
           fi
 
       - name: Keep the debug binary
