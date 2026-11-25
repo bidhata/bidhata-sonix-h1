@@ -959,6 +959,48 @@ void volume_limit_set(volume_output_t out, int percent) {
 	limit_enforce(out);
 }
 
+// A last look at the level before a track is allowed to play, so that if one
+// ever does get above the ceiling the jump is caught at the only moment it
+// would be heard rather than seen. Every path that sets the volume clamps as
+// it goes -- set_volume_percent(), volume_profile_set_level() and
+// limit_enforce() between them cover the keys, the slider, the restore at boot
+// and a limit lowered while another output is in use -- so this should find
+// nothing. It is here because the cost of being wrong is one second of full
+// volume in a pair of headphones, and the check is two comparisons.
+int volume_safety_enforce_active(void) {
+	limit_load();
+	int ceiling = limit_ceiling(profile_out);
+
+	// The remembered level too, not just the live one: clamping only what is
+	// playing would leave a stale value to come back on the next switch to
+	// this output.
+	if (output_in_range(profile_out) && level[profile_out] > ceiling) {
+		level[profile_out] = ceiling;
+		profile_dirty = true;
+	}
+
+	// Line out holds the hardware at its own fixed index, which is above every
+	// ceiling, so current_percent under the mode is that index and says nothing
+	// about what the user will hear. Only the level waiting underneath for when
+	// the mode ends can be too loud, and bringing the hardware down here would
+	// undo the fixed drive the amplifier is expecting. Same rule as
+	// limit_enforce().
+	if (lineout_on) {
+		if (lineout_saved_percent > ceiling) {
+			lineout_saved_percent = ceiling;
+		}
+		return current_percent;
+	}
+
+	if (current_percent > ceiling) {
+		fprintf(stderr, "volume: safety clamp %d%% -> %d%% (limit)\n", current_percent, ceiling);
+		profile_dirty = true;
+		apply_volume_hw(ceiling);
+		volume_profile_persist();
+	}
+	return current_percent;
+}
+
 void volume_profile_set_level(volume_output_t out, int percent) {
 	if (!output_in_range(out)) {
 		return;

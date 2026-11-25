@@ -211,4 +211,11 @@ void volume_limit_set_enabled(bool on);
 int volume_limit(volume_output_t out); // 100 for an output that has none
 void volume_limit_set(volume_output_t out, int percent);
 
+// A guard called at playback start: should the level ever be above the
+// ceiling, brings it down and writes it to the hardware before the first
+// frames. Every setter clamps already, so this is a safety net, not the place
+// the limit is kept. Leaves the hardware alone under line out. Returns the
+// percent in force afterwards.
+int volume_safety_enforce_active(void);
+
 #endif
