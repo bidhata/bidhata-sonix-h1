@@ -290,6 +290,13 @@ Pull requests are welcome: one thing per request, tested on a real player where 
 - **[Tartarus6](https://github.com/Tartarus6)** for Sonix Player and the [custom kernel](https://github.com/Tartarus6/hiby-custom-kernel) this runs on. A copy of the kernel build kit is in [`hiby-custom-kernel/`](hiby-custom-kernel).
 - **Jepl4r / M4ttia**, who started Sonix.
 - [@noisetta](https://github.com/noisetta), [@endgame47](https://github.com/endgame47), [@hkhrithik007](https://github.com/hkhrithik007) and everyone who has sent a fix upstream.
+- The people whose upstream pull requests this fork carries, and who wrote much of what the list above calls new here:
+  - **[@CookieCaptainD](https://github.com/CookieCaptainD)** — the MSEB clipping fix, the volume clamp, the radio volume on USB-C, the audiobook chapter limit, stopping the R1's cell in DAC mode, the update model check, the chapter in the progress row, the date on the lock screen, "play once", the duplicate-track question, the playlist import, hidden Wi-Fi networks, waking the R1 on a cable, and the European Portuguese translation.
+  - **Bill Kolokithas** — SonixLink's titles for streamed tracks, and Tidal's favourite playlists.
+  - **Shawn Beachy** — the `PART` tag when reading an audiobook's series.
+  - **Max Vitvitskyy** — Ukrainian. **davralin** — Norsk bokmål.
+
+  Some of it was taken with changes, and where that happened the change is its own commit next to theirs, so the git history says who wrote which part.
 - [@endgame47](https://github.com/endgame47) again, for suggesting this fork's name and the way this page keeps upstream's work and the fork's apart.
 - **Tavisco**, on Discord, for pointing out that Flappy Bird is somebody else's game to ship.
 - [LVGL](https://lvgl.io), [FFmpeg](https://ffmpeg.org), [Gearboy](https://github.com/drhelius/Gearboy), [BlueALSA](https://github.com/arkq/bluez-alsa), and the authors of the decoders in `src/system/decode`.
