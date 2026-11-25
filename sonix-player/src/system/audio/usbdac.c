@@ -407,16 +407,24 @@ static void gadget_teardown(void) {
 static void apply_charging(void) {
 	bool on = usbdac_charging_enabled();
 
-	// power.c owns the charger. It stops charging through the driver's
-	// step-charging bit, which leaves the input path feeding the system -- so
-	// the player carries on running from the cable with the battery untouched,
-	// which is the whole point here.
-	power_set_charging_allowed(on);
+	// power.c owns the charger, whichever chip it is: the MP2731's
+	// step-charging bit on the R3 Pro II, the PMIC's charge bit on the R1.
+	// Either way the input path keeps feeding the system, so the player
+	// carries on running from the cable with the battery untouched, which is
+	// the whole point here.
+	bool took = power_set_charging_allowed(on);
+	bool stopped = !on && took; // asked to stop, and the charger agreed
 
 	// Say so where the user looks: with the charger off the battery icon and
-	// the LED must stop claiming a charge is happening.
-	system_suppress_charging(!on);
-	printf("usbdac: charging %s while in DAC mode\n", on ? "allowed" : "held off");
+	// the LED must stop claiming a charge is happening. Only once the charger
+	// has agreed, though -- a refused stop leaves the cell charging, and an
+	// icon saying otherwise would be the one lie worse than no feature at all.
+	system_suppress_charging(stopped);
+	if (!on && !took) {
+		printf("usbdac: the charger would not stop; charging goes on\n");
+	} else {
+		printf("usbdac: charging %s while in DAC mode\n", on ? "allowed" : "held off");
+	}
 }
 
 // The live answer, cached here rather than read back out of the config every

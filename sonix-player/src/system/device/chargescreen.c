@@ -685,6 +685,11 @@ bool chargescreen_mark(int mark) { return axpcharge_reg_write(AXP_REG_MARK, (uin
 // the interface is up: the drivers start every boot without it.
 static void apply_charge_limit(void) {
 	if (axpcharge_applies()) {
+		// This screen runs before power_init(), so its release has not
+		// happened yet: a cell stopped for DAC mode would still be stopped,
+		// and the one screen whose whole purpose is charging would sit on a
+		// cable doing nothing.
+		axpcharge_charging_release();
 		axpcharge_set(config_get_bool("power", "charge_limit_80", false), config_get_bool("power", "charge_500ma", false));
 	} else {
 		power_set_charge_limit((int)config_get_int("power", "charge_limit", 100));

@@ -363,7 +363,8 @@ static void find_charge_node(void) {
 
 	// A player charged by its PMIC has no MP2731 and no such node: its limit
 	// is axpcharge's to keep, and saying here that it cannot be enforced
-	// would be saying it of the wrong charger.
+	// would be saying it of the wrong charger. The same goes for stopping the
+	// cell outright, which power_set_charging_allowed() sends to axpcharge.
 	const sysinfo_model_t *model = sysinfo_model();
 	if (model && model->pmic_charger) {
 		return;
@@ -394,6 +395,12 @@ bool power_charge_limit_supported(void) {
 int power_get_charge_limit(void) { return g_charge_limit; }
 
 bool power_charging_held(void) {
+	// A cell stopped for DAC mode counts: the cable is in and the player runs
+	// off it, but nothing reaches the battery, which is what the status bar
+	// and the LED are asking about.
+	if (axpcharge_charging_blocked()) {
+		return true;
+	}
 	if (g_driver_limit) {
 		return driver_limit_held() || axpcharge_holding();
 	}
@@ -403,6 +410,10 @@ bool power_charging_held(void) {
 static void charger_run(bool run);
 
 void power_charging_release(void) {
+	// The PMIC keeps its bit across a shutdown exactly as the MP2731 keeps
+	// its own, so the R1 needs the same release on the way out.
+	axpcharge_charging_release();
+
 	find_charge_node();
 	if (!g_charge_node) {
 		return;
@@ -411,9 +422,15 @@ void power_charging_release(void) {
 	g_charging_suspended = false;
 }
 
-// The same, for the crash handler: one open, one write and one close on the
-// node power_init() resolved, which is all a signal handler may call.
+// The same, for the crash handler: a few opens, writes and closes on the node
+// power_init() resolved and on the PMIC's bus, which is all a signal handler
+// may call.
 void power_charging_release_from_signal(void) {
+	// open/ioctl/close and a trylock, and it prints nothing: what the handler
+	// allows. A lock it cannot take is given up on rather than waited for --
+	// the release at the next start is the backstop for that case.
+	axpcharge_charging_release_quiet();
+
 	const char *node = g_charge_node;
 	if (!node) {
 		return;
@@ -509,18 +526,28 @@ void power_charge_limit_tick(void) { apply_charge_limit(); }
 // Forbids or allows charging outright, on top of whatever the percentage limit
 // is doing. DAC mode is the one caller: the choice is the user's and the
 // percentage limit must not undo it.
-void power_set_charging_allowed(bool allowed) {
+bool power_set_charging_allowed(bool allowed) {
 	find_charge_node();
 	g_charging_blocked = !allowed;
 
+	// The R1 has no step-charging node: its cell is the PMIC's to stop, at the
+	// one bit axpcharge keeps. Allowing it again goes through the release, not
+	// a plain request, because that is the direction the tick should keep
+	// trying until the chip agrees -- nothing is harmed by charging.
+	if (axpcharge_charging_control_supported()) {
+		bool ok = allowed ? axpcharge_charging_release() : axpcharge_set_charging(false);
+		printf("power: cell charging %s%s\n", allowed ? "allowed again" : "forbidden", ok ? "" : " (the PMIC refused)");
+		return ok;
+	}
+
 	if (!g_charge_node) {
 		printf("power: charging cannot be controlled on this firmware\n");
-		return;
+		return false;
 	}
 
 	printf("power: charging %s\n", allowed ? "allowed again" : "forbidden");
 	apply_charge_limit(); // one place decides, including this
-
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1978,6 +2005,15 @@ void power_init(const power_config_t *cfg, lv_display_t *disp) {
 
 	// The charger's node, looked for now: the crash handler cannot search for it.
 	find_charge_node();
+
+	// The bit is cleared at every start before anything can look at it. The
+	// charge code takes the bit as outliving a boot -- it treats one found
+	// already clear as stale rather than as the user's choice -- and on that
+	// reading a player that lost power in DAC mode, or crashed before the
+	// handler's release got the lock, would come back and never charge again.
+	// The release costs one register read when there is nothing to undo, so
+	// it is done whether or not the chip really keeps the bit.
+	axpcharge_charging_release();
 
 	// if no explicit on-brightness was configured, adopt whatever the panel is
 	// currently set to (falling back to max). Never adopt a too-dim value: a

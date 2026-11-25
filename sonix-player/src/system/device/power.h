@@ -207,14 +207,16 @@ bool power_charge_limit_supported(void);
 // LED follow, so neither claims a charge that is not happening.
 bool power_charging_held(void);
 
-// Puts the charger back on and forgets the limit is holding it off. For the
-// paths that end the player: the charger driver keeps the bit across a
-// shutdown, so a device switched off at its charge limit would come back to a
-// cable that does nothing until the next boot resets the chip.
+// Puts the charger back on and forgets the limit is holding it off, on both
+// chargers. For the paths that end the player: the chip keeps the bit across a
+// shutdown, so a device switched off at its charge limit -- or with its cell
+// stopped for DAC mode -- would come back to a cable that does nothing.
 void power_charging_release(void);
 
 // The same from a signal handler: async-signal-safe calls only, on the node
-// power_init() found. Does nothing before power_init().
+// power_init() found, and on the PMIC through a lock it gives up on rather
+// than waits for. The node half does nothing before power_init(), which is
+// what resolves it; the PMIC half stands on its own.
 void power_charging_release_from_signal(void);
 
 // One pass of the charge limit's decision, for a caller that runs without the
@@ -231,7 +233,11 @@ void power_shutdown(void);
 // DAC mode, where the point of not charging is to keep the charger's noise off
 // the cable. Stopping the charger takes three writes in a set order -- see
 // charger_run() -- and this is the only place that knows them.
-void power_set_charging_allowed(bool allowed);
+// True when the charger took the request. False says nothing was changed --
+// no controllable charger, or the PMIC refused the stop (a cell too low to
+// run the player from the cable alone) -- so a caller showing the user that
+// charging has stopped must not do so on a false.
+bool power_set_charging_allowed(bool allowed);
 
 // Powers the device off after `minutes` with no input and nothing playing.
 void power_set_auto_off(bool enabled, uint32_t minutes);
