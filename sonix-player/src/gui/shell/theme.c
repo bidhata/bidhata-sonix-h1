@@ -19,14 +19,25 @@ lv_style_t theme_style_switch_checked; // switch indicator, on state
 lv_style_t theme_style_accent_bg;	   // anything that must follow the accent
 lv_style_t theme_style_slider_track;   // a slider's unfilled part
 
-// GNOME Adwaita (libadwaita) colours, dark variant: window #242424, cards
-// #303030 (white at 8%% over the window), accent blue #3584e4. Secondary text
-// is white at 55%%, flattened against the card colour.
+// GNOME Adwaita (libadwaita) colours, dark variant, with the page taken to
+// black: cards are still #303030 and the accent is still Adwaita's #3584e4,
+// but the window and the status bar are #000000 rather than #242424 and
+// #1e1e1e. Secondary text is white at 55%%, flattened against the card colour.
+//
+// The panel goes with the page deliberately. It was a step darker than the
+// window, which on a black page would have left the status bar and the
+// player's control block as lighter bands across the top and bottom -- the
+// opposite of what they are meant to be. Cards keep their own colour, so the
+// structure of the interface still comes from what is lifted off the
+// background rather than from the background itself.
+//
+// cover_bg stays #1e1e1e: it fills the square where artwork would be, and a
+// shade above the page is what says the artwork is missing rather than dark.
 static theme_palette_t palette_dark = {
-	.screen_bg = LV_COLOR_MAKE(36, 36, 36),
+	.screen_bg = LV_COLOR_MAKE(0, 0, 0),
 	.surface = LV_COLOR_MAKE(48, 48, 48),
 	.surface_pressed = LV_COLOR_MAKE(64, 64, 64),
-	.panel = LV_COLOR_MAKE(30, 30, 30),
+	.panel = LV_COLOR_MAKE(0, 0, 0),
 	.cover_bg = LV_COLOR_MAKE(30, 30, 30),
 	.text_primary = LV_COLOR_MAKE(255, 255, 255),
 	.text_secondary = LV_COLOR_MAKE(160, 160, 160),
